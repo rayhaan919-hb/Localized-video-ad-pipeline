@@ -1,4 +1,4 @@
-"""FFmpeg compositor merging 9:16 Veo video clips, TTS voiceover, and caption metadata."""
+"""FFmpeg / Remotion compositor merging Veo clips, TTS voiceover, and validated MP4 output."""
 
 from __future__ import annotations
 
@@ -9,11 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from app.config import RENDERS_DIR, REPO_ROOT, settings
-from app.veo import ensure_sample_fixture, get_ffmpeg_binary
+from app.storage import validate_mp4_file
+from app.veo import get_ffmpeg_binary
+
+
+class CompositorError(Exception):
+    """Raised when final video composition or validation fails."""
 
 
 def _format_ass_ts(ms: int) -> str:
-    """Convert milliseconds to ASS timestamp format H:MM:SS.cc."""
     clamped = max(0, int(ms))
     total_cs = clamped // 10
     cs = total_cs % 100
@@ -25,13 +29,11 @@ def _format_ass_ts(ms: int) -> str:
 
 
 def _escape_ass(text: str) -> str:
-    """Escape curly braces and line breaks for safe ASS dialogue rendering."""
     cleaned = str(text or "").replace("{", "(").replace("}", ")")
     return cleaned.replace("\r\n", "\\N").replace("\n", "\\N").strip()
 
 
 def _highlight_caption_ass(text: str, highlight_word: str) -> str:
-    """Apply Indigo (#6366F1 -> BGR &HF16663&) emphasis to the caption highlight word."""
     escaped = _escape_ass(text)
     hw = _escape_ass(highlight_word)
     if hw and hw in escaped:
@@ -41,12 +43,13 @@ def _highlight_caption_ass(text: str, highlight_word: str) -> str:
 
 
 def _build_ass_subtitles(script_json: dict[str, Any]) -> str:
-    """Build an ASS subtitle script with RTL/LTR banner, hook, timed captions, and CTA."""
     font_name = str(script_json.get("font_family") or "Arial").strip() or "Arial"
-    total_ms = max(1500, int(script_json.get("duration_ms") or 2000))
+    total_ms = max(1500, int(script_json.get("duration_ms") or 4000))
     end_ts = _format_ass_ts(total_ms)
+    ratio = str(script_json.get("aspect_ratio") or "9:16")
+    play_x, play_y = (960, 540) if ratio == "16:9" else (540, 960)
 
-    brand = _escape_ass(str(script_json.get("brand") or "Localized D2C"))
+    brand = _escape_ass(str(script_json.get("brand") or ""))
     price = _escape_ass(str(script_json.get("price_badge") or ""))
     discount = _escape_ass(str(script_json.get("discount_badge") or ""))
     banner_parts = [part for part in [brand, price, discount] if part]
@@ -58,8 +61,8 @@ def _build_ass_subtitles(script_json: dict[str, Any]) -> str:
     lines = [
         "[Script Info]",
         "ScriptType: v4.00+",
-        "PlayResX: 540",
-        "PlayResY: 960",
+        f"PlayResX: {play_x}",
+        f"PlayResY: {play_y}",
         "WrapStyle: 2",
         "ScaledBorderAndShadow: yes",
         "",
@@ -76,15 +79,15 @@ def _build_ass_subtitles(script_json: dict[str, Any]) -> str:
         ),
         (
             f"Style: HookTitle,{font_name},24,&H00FAFAFA,&H00FFFFFF,&H0009090B,"
-            "&HA609090B,1,0,0,0,100,100,0,0,1,2.5,1,8,34,34,116,1"
+            "&HA609090B,1,0,0,0,100,100,0,0,1,2.5,1,8,34,34,108,1"
         ),
         (
             f"Style: Caption,{font_name},28,&H00FAFAFA,&H00FFFFFF,&H0009090B,"
-            "&HB309090B,1,0,0,0,100,100,0,0,1,3,1,2,32,32,188,1"
+            "&HB309090B,1,0,0,0,100,100,0,0,1,3,1,2,32,32,140,1"
         ),
         (
             f"Style: CtaDock,{font_name},20,&H00FFFFFF,&H00FFFFFF,&H00463731,"
-            "&H00F16663,1,0,0,0,100,100,0,0,1,1.5,0,2,36,36,48,1"
+            "&H00F16663,1,0,0,0,100,100,0,0,1,1.5,0,2,36,36,44,1"
         ),
         "",
         "[Events]",
@@ -129,18 +132,18 @@ def _try_remotion_cli_render(
 
     props_path = final_mp4_path.parent / f"{job_id}_props.json"
     props_payload = {
-        "productTitle": script_json.get("product_title", "Signature Product"),
-        "brandName": script_json.get("brand", "Localized D2C"),
+        "productTitle": script_json.get("product_title", "Featured Product"),
+        "brandName": script_json.get("brand", ""),
         "priceDisplay": script_json.get("price_badge", ""),
         "originalPriceDisplay": script_json.get("original_price_display", ""),
         "discountBadge": script_json.get("discount_badge", ""),
-        "currency": script_json.get("currency", "USD"),
+        "currency": script_json.get("currency", ""),
         "targetLanguage": script_json.get("target_language", "ur"),
         "adAngle": script_json.get("ad_angle", "problem_solution"),
         "hookText": script_json.get("hook", ""),
         "ctaText": script_json.get("cta_text", ""),
         "captions": script_json.get("captions", []),
-        "durationInFrames": script_json.get("duration_in_frames", 60),
+        "durationInFrames": script_json.get("duration_in_frames", 120),
     }
     lang_code = str(script_json.get("target_language") or "ur").upper()
     comp_id = f"VerticalAd-{lang_code if lang_code in {'UR', 'AR', 'HI', 'EN'} else 'UR'}"
@@ -162,7 +165,8 @@ def _try_remotion_cli_render(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return final_mp4_path.exists() and final_mp4_path.stat().st_size > 1024
+        validate_mp4_file(final_mp4_path, require_audio=False, min_duration_seconds=0.5)
+        return True
     except Exception:
         return False
     finally:
@@ -178,14 +182,22 @@ def _run_ffmpeg_encode(
     vf_chain: str | None,
     cwd: Path | None = None,
 ) -> bool:
-    """Run FFmpeg with optional video filters and voiceover AAC audio mux."""
-    has_wav = voiceover_wav_path.exists()
-    cmd: list[str] = [ffmpeg_exe, "-y", "-i", str(source_video_path)]
-    if has_wav:
-        cmd.extend(["-i", str(voiceover_wav_path), "-map", "0:v:0", "-map", "1:a:0"])
-    else:
-        cmd.extend(["-map", "0:v:0", "-map", "0:a:0?"])
+    """Run FFmpeg muxing source video, localized overlays, and required WAV voiceover."""
+    if not voiceover_wav_path.exists():
+        raise CompositorError(f"Voiceover WAV missing at {voiceover_wav_path}")
 
+    cmd: list[str] = [
+        ffmpeg_exe,
+        "-y",
+        "-i",
+        str(source_video_path),
+        "-i",
+        str(voiceover_wav_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+    ]
     if vf_chain:
         cmd.extend(
             ["-vf", vf_chain, "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"]
@@ -193,11 +205,13 @@ def _run_ffmpeg_encode(
     else:
         cmd.extend(["-c:v", "copy"])
 
-    if has_wav:
-        cmd.extend(["-c:a", "aac", "-b:a", "128k", "-shortest"])
-
     cmd.extend(
         [
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
             "-metadata",
             f"title={script_json.get('product_title', 'Localized Video Ad')}",
             "-metadata",
@@ -213,8 +227,10 @@ def _run_ffmpeg_encode(
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        timeout=120.0,
     )
-    return final_mp4_path.exists() and final_mp4_path.stat().st_size > 1024
+    validate_mp4_file(final_mp4_path, require_audio=True, min_duration_seconds=0.5)
+    return True
 
 
 def composite_final_video(
@@ -224,14 +240,15 @@ def composite_final_video(
     script_json: dict[str, Any],
     output_dir: Path | None = None,
 ) -> Path:
-    """Composite the 9:16 clip with burned-in RTL/LTR overlays and TTS voiceover."""
+    """Composite source video + localized overlays + voiceover into a verified MP4."""
+    if not source_video_path.exists():
+        raise CompositorError(f"Source video clip does not exist: {source_video_path}")
+    if not voiceover_wav_path.exists():
+        raise CompositorError(f"Voiceover audio file does not exist: {voiceover_wav_path}")
+
     target_dir = output_dir or RENDERS_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
     final_mp4_path = target_dir / f"{job_id}.mp4"
-
-    duration_seconds = float(script_json.get("duration_ms", 2000)) / 1000.0
-    if not source_video_path.exists():
-        source_video_path = ensure_sample_fixture(duration_seconds=duration_seconds)
 
     if _try_remotion_cli_render(job_id, script_json, final_mp4_path):
         return final_mp4_path
@@ -239,60 +256,35 @@ def composite_final_video(
     ass_path = target_dir / f"{job_id}.ass"
     drawbox_filter = (
         "drawbox=x=0:y=0:w=iw:h=88:color=0x09090B@0.82:t=fill,"
-        "drawbox=x=24:y=102:w=iw-48:h=126:color=0x18181B@0.76:t=fill,"
-        "drawbox=x=20:y=660:w=iw-40:h=142:color=0x09090B@0.78:t=fill,"
-        "drawbox=x=28:y=874:w=iw-56:h=58:color=0x6366F1@0.94:t=fill"
+        "drawbox=x=24:y=102:w=iw-48:h=120:color=0x18181B@0.76:t=fill,"
+        "drawbox=x=20:y=ih-280:w=iw-40:h=142:color=0x09090B@0.78:t=fill,"
+        "drawbox=x=28:y=ih-88:w=iw-56:h=58:color=0x6366F1@0.94:t=fill"
     )
 
     try:
         ffmpeg_exe = get_ffmpeg_binary()
         ass_path.write_text(_build_ass_subtitles(script_json), encoding="utf-8")
 
-        # Pass relative ass filename with cwd=target_dir so Windows drive colons never break libass.
-        full_vf = f"{drawbox_filter},ass={ass_path.name}"
-        try:
-            if _run_ffmpeg_encode(
-                ffmpeg_exe,
-                source_video_path,
-                voiceover_wav_path,
-                final_mp4_path,
-                script_json,
-                vf_chain=full_vf,
-                cwd=target_dir,
-            ):
-                return final_mp4_path
-        except Exception:
-            pass
-
-        # Fallback 1: drawbox tonal chrome without libass
-        try:
-            if _run_ffmpeg_encode(
-                ffmpeg_exe,
-                source_video_path,
-                voiceover_wav_path,
-                final_mp4_path,
-                script_json,
-                vf_chain=drawbox_filter,
-            ):
-                return final_mp4_path
-        except Exception:
-            pass
-
-        # Fallback 2: direct stream copy + AAC audio mux
-        try:
-            if _run_ffmpeg_encode(
-                ffmpeg_exe,
-                source_video_path,
-                voiceover_wav_path,
-                final_mp4_path,
-                script_json,
-                vf_chain=None,
-            ):
-                return final_mp4_path
-        except Exception:
-            pass
+        for vf_chain, cwd in [
+            (f"{drawbox_filter},ass={ass_path.name}", target_dir),
+            (drawbox_filter, None),
+            (None, None),
+        ]:
+            try:
+                if _run_ffmpeg_encode(
+                    ffmpeg_exe,
+                    source_video_path,
+                    voiceover_wav_path,
+                    final_mp4_path,
+                    script_json,
+                    vf_chain=vf_chain,
+                    cwd=cwd,
+                ):
+                    return final_mp4_path
+            except Exception:
+                final_mp4_path.unlink(missing_ok=True)
+                continue
     finally:
         ass_path.unlink(missing_ok=True)
 
-    shutil.copyfile(source_video_path, final_mp4_path)
-    return final_mp4_path
+    raise CompositorError(f"All FFmpeg encoding attempts failed for job {job_id}.")

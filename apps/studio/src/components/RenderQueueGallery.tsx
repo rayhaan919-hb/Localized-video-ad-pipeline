@@ -1,25 +1,22 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  Ban,
   CheckCircle2,
   Clock,
   Download,
   Eye,
   Film,
-  HardDriveDownload,
+  Link,
   Play,
   RotateCcw,
   Trash2,
   XCircle,
 } from 'lucide-react';
 import { LANGUAGE_FONT_METADATA } from '@video-ad/remotion';
-import type {
-  JobStatus,
-  VideoJobRecord,
-  ViewStateMode,
-} from '@/types/studio';
+import type { JobStatus, VideoJobRecord, ViewStateMode } from '@/types/studio';
 
 interface RenderQueueGalleryProps {
   jobs: VideoJobRecord[];
@@ -29,31 +26,35 @@ interface RenderQueueGalleryProps {
   viewStateMode: ViewStateMode;
   onSelectJobForPreview: (job: VideoJobRecord) => void;
   onRetryFetchJobs: () => void;
+  onCancelJob: (jobId: string) => void;
+  onRetryJob: (jobId: string) => void;
+  onCopySignedUrl: (jobId: string) => void;
   onGenerateFirstJob: () => void;
   onClearLocalJobs: () => void;
-  onTriggerTestFailureJob: () => void;
 }
 
-type FilterTab = 'ALL' | 'COMPLETED' | 'ACTIVE' | 'FAILED';
-
-const PIPELINE_STEPS: readonly { key: JobStatus; label: string }[] = [
-  { key: 'PENDING', label: '1. Queued' },
-  { key: 'GENERATING_CLIPS', label: '2. Veo 3.1' },
-  { key: 'COMPOSITING', label: '3. Remotion' },
-  { key: 'COMPLETED', label: '4. MP4 Ready' },
-] as const;
+const PIPELINE_STEPS: Array<{ key: string; label: string }> = [
+  { key: 'CREATED', label: '01 QUEUED' },
+  { key: 'PROCESSING', label: '02 AI + TTS' },
+  { key: 'RENDERING', label: '03 FFMPEG' },
+  { key: 'COMPLETED', label: '04 READY' },
+];
 
 function getStepProgressIndex(status: JobStatus): number {
   switch (status) {
+    case 'CREATED':
+    case 'QUEUED':
     case 'PENDING':
       return 1;
+    case 'PROCESSING':
     case 'GENERATING_CLIPS':
       return 2;
+    case 'RENDERING':
     case 'COMPOSITING':
       return 3;
     case 'COMPLETED':
       return 4;
-    case 'FAILED':
+    default:
       return 0;
   }
 }
@@ -66,47 +67,58 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
   viewStateMode,
   onSelectJobForPreview,
   onRetryFetchJobs,
+  onCancelJob,
+  onRetryJob,
+  onCopySignedUrl,
   onGenerateFirstJob,
   onClearLocalJobs,
-  onTriggerTestFailureJob,
 }) => {
-  const [filterTab, setFilterTab] = useState<FilterTab>('ALL');
+  const [filterTab, setFilterTab] = useState<
+    'ALL' | 'COMPLETED' | 'ACTIVE' | 'FAILED'
+  >('ALL');
+
+  const filteredJobs = useMemo(() => {
+    if (filterTab === 'ALL') {
+      return jobs;
+    }
+    if (filterTab === 'COMPLETED') {
+      return jobs.filter((job) => job.status === 'COMPLETED');
+    }
+    if (filterTab === 'FAILED') {
+      return jobs.filter(
+        (job) => job.status === 'FAILED' || job.status === 'CANCELLED'
+      );
+    }
+    return jobs.filter(
+      (job) =>
+        job.status !== 'COMPLETED' &&
+        job.status !== 'FAILED' &&
+        job.status !== 'CANCELLED'
+    );
+  }, [jobs, filterTab]);
 
   const showSkeleton = isLoadingJobs || viewStateMode === 'loading';
   const showError = Boolean(jobsError) || viewStateMode === 'error';
-
-  const filteredJobs = jobs.filter((job) => {
-    if (filterTab === 'ALL') return true;
-    if (filterTab === 'COMPLETED') return job.status === 'COMPLETED';
-    if (filterTab === 'FAILED') return job.status === 'FAILED';
-    return (
-      job.status === 'PENDING' ||
-      job.status === 'GENERATING_CLIPS' ||
-      job.status === 'COMPOSITING'
-    );
-  });
-
   const showEmpty =
     (!showSkeleton && filteredJobs.length === 0) || viewStateMode === 'empty';
 
   return (
     <section
-      aria-label="Bottom Render Queue Strip and MP4 Download Gallery"
-      className="w-full rounded border border-[#27272A] bg-[#18181B] p-4"
+      aria-label="Render Queue and MP4 Download Gallery"
+      className="rounded border border-[#27272A] bg-[#18181B] p-4"
     >
-      {/* Header Row */}
+      {/* Header & Filter Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#27272A] pb-3">
         <div className="flex items-center gap-2">
-          <HardDriveDownload className="h-4 w-4 text-[#6366F1]" />
+          <Film className="h-4 w-4 text-[#6366F1]" />
           <h2 className="text-sm font-semibold text-[#FAFAFA]">
-            3. Render Queue & MP4 Download Gallery
+            3. Workspace Render Queue & Private MP4 Downloads
           </h2>
           <span className="font-mono-code tabular-nums rounded border border-[#27272A] bg-[#09090B] px-2 py-0.5 text-[11px] font-semibold text-[#FAFAFA]">
             {jobs.length} JOBS
           </span>
         </div>
 
-        {/* Filter Pills + Actions */}
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center gap-1 rounded border border-[#27272A] bg-[#09090B] p-1">
             {(['ALL', 'COMPLETED', 'ACTIVE', 'FAILED'] as const).map((tab) => {
@@ -130,25 +142,16 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
 
           <button
             type="button"
-            onClick={onTriggerTestFailureJob}
-            title="Test Atomic Credit Refund on Failed Job"
-            className="rounded border border-[#27272A] bg-[#09090B] px-2.5 py-1 text-xs text-[#A1A1AA] transition-colors hover:border-[#FAFAFA]/40 hover:text-[#FAFAFA]"
-          >
-            Simulate Fail + Refund
-          </button>
-
-          <button
-            type="button"
             onClick={onClearLocalJobs}
             className="flex items-center gap-1 rounded border border-[#27272A] bg-[#09090B] px-2.5 py-1 text-xs text-[#A1A1AA] transition-colors hover:border-red-500/60 hover:text-red-400"
           >
             <Trash2 className="h-3 w-3" />
-            <span>Clear</span>
+            <span>Clear View</span>
           </button>
         </div>
       </div>
 
-      {/* Mandatory DESIGN.md State 3: Inline Error Banner with Retry Button */}
+      {/* Inline Error Banner */}
       {showError ? (
         <div
           role="alert"
@@ -163,7 +166,7 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
               </p>
               <p className="text-xs text-[#A1A1AA]">
                 {jobsError ??
-                  'Could not fetch video_jobs from worker endpoint (/v1/videos). Verify connection and retry.'}
+                  'Could not fetch workspace video jobs from API. Verify sign-in and worker connectivity.'}
               </p>
             </div>
           </div>
@@ -178,10 +181,9 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
         </div>
       ) : null}
 
-      {/* Main Content Area: Skeleton Loader / Actionable Empty State / Job Cards */}
+      {/* Main Content */}
       <div className="mt-4">
         {showSkeleton ? (
-          /* Mandatory DESIGN.md State 1: Skeleton Loader matching exact card grid dimensions */
           <div
             data-testid="queue-skeleton"
             className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3"
@@ -198,17 +200,11 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
                 <div className="flex flex-col gap-2">
                   <div className="h-4 w-3/4 animate-pulse rounded bg-[#27272A]" />
                   <div className="h-4 w-full animate-pulse rounded bg-[#18181B]" />
-                  <div className="h-3 w-2/3 animate-pulse rounded bg-[#18181B]" />
-                </div>
-                <div className="grid grid-cols-2 gap-2 pt-2">
-                  <div className="h-8 animate-pulse rounded bg-[#18181B]" />
-                  <div className="h-8 animate-pulse rounded bg-[#27272A]" />
                 </div>
               </div>
             ))}
           </div>
         ) : showEmpty ? (
-          /* Mandatory DESIGN.md State 2: Actionable Empty State (icon + 1-line explanation + primary CTA) */
           <div
             data-testid="queue-empty-state"
             className="flex flex-col items-center justify-center gap-3 rounded border border-[#27272A] bg-[#09090B] py-8 px-4 text-center"
@@ -217,8 +213,8 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
               <Film className="h-5 w-5 text-[#6366F1]" />
             </div>
             <p className="text-xs text-[#A1A1AA]">
-              No rendered 9:16 video ads in this queue view yet — generate your
-              first localized Veo 3.1 + Remotion ad to download the MP4.
+              No video renders in this workspace view yet. Confirm product
+              details above and dispatch a render.
             </p>
             <button
               type="button"
@@ -226,11 +222,10 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
               className="flex items-center gap-1.5 rounded border border-[#6366F1] bg-[#6366F1] px-4 py-2 text-xs font-semibold text-[#FAFAFA] transition-colors hover:bg-[#5254E8]"
             >
               <Play className="h-3.5 w-3.5" />
-              <span>Generate First 9:16 Video Ad (1 Credit)</span>
+              <span>Render Ad Job (1 Credit)</span>
             </button>
           </div>
         ) : (
-          /* Active Render Job Cards Grid */
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {filteredJobs.map((job) => {
               const langMeta =
@@ -238,6 +233,11 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
                 LANGUAGE_FONT_METADATA.ur;
               const isSelected = activeJobId === job.id;
               const progressIdx = getStepProgressIndex(job.status);
+              const isTerminal =
+                job.status === 'COMPLETED' ||
+                job.status === 'FAILED' ||
+                job.status === 'CANCELLED';
+
               const scriptClassName =
                 job.target_language === 'ur'
                   ? 'font-script-ur'
@@ -265,7 +265,7 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
                       : 'border-[#27272A] bg-[#09090B] hover:border-[#FAFAFA]/30'
                   }`}
                 >
-                  {/* Top Row: Job UUID + Language Pill + Status Badge */}
+                  {/* Top Row */}
                   <div className="flex items-center justify-between gap-2 border-b border-[#27272A] pb-2.5">
                     <div className="flex items-center gap-1.5">
                       <span className="font-mono-code tabular-nums text-xs font-semibold text-[#FAFAFA]">
@@ -273,7 +273,7 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
                       </span>
                       <span className="font-mono-code tabular-nums rounded border border-[#27272A] bg-[#18181B] px-1.5 py-0.5 text-[10px] font-semibold text-[#A1A1AA]">
                         {job.target_language.toUpperCase()} ·{' '}
-                        {langMeta.dir.toUpperCase()}
+                        {job.aspect_ratio ?? '9:16'}
                       </span>
                     </div>
 
@@ -282,10 +282,10 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
                         <CheckCircle2 className="h-3 w-3 text-[#6366F1]" />
                         COMPLETED
                       </span>
-                    ) : job.status === 'FAILED' ? (
+                    ) : job.status === 'FAILED' || job.status === 'CANCELLED' ? (
                       <span className="font-mono-code tabular-nums flex items-center gap-1 rounded border border-red-500/60 bg-[#18181B] px-2 py-0.5 text-[10px] font-semibold text-red-400">
                         <XCircle className="h-3 w-3 text-red-400" />
-                        FAILED · REFUNDED
+                        {job.status} · REFUNDED
                       </span>
                     ) : (
                       <span className="font-mono-code tabular-nums flex items-center gap-1 rounded border border-[#27272A] bg-[#18181B] px-2 py-0.5 text-[10px] font-semibold text-[#A1A1AA]">
@@ -295,17 +295,20 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
                     )}
                   </div>
 
-                  {/* Pipeline Step Progress Strip */}
+                  {/* Step Progress Strip */}
                   <div className="grid grid-cols-4 gap-1">
                     {PIPELINE_STEPS.map((step, idx) => {
                       const stepNum = idx + 1;
                       const reached =
-                        job.status !== 'FAILED' && progressIdx >= stepNum;
+                        job.status !== 'FAILED' &&
+                        job.status !== 'CANCELLED' &&
+                        progressIdx >= stepNum;
                       return (
                         <div key={step.key} className="flex flex-col gap-1">
                           <div
                             className={`h-1 w-full rounded ${
-                              job.status === 'FAILED'
+                              job.status === 'FAILED' ||
+                              job.status === 'CANCELLED'
                                 ? 'bg-red-500/50'
                                 : reached
                                 ? 'bg-[#6366F1]'
@@ -320,14 +323,14 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
                     })}
                   </div>
 
-                  {/* Middle: Product Title, Hook & Veo GCS URI */}
+                  {/* Middle Metadata */}
                   <div className="flex flex-col gap-1.5">
                     <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-[#FAFAFA]">
-                        {job.script_json?.brand ?? 'D2C Storefront'}
+                      <span className="truncate font-semibold text-[#FAFAFA]">
+                        {job.script_json?.brand ?? 'Workspace Ad'}
                       </span>
                       <span className="font-mono-code tabular-nums text-xs font-semibold text-[#6366F1]">
-                        {job.script_json?.price_badge ?? 'PKR 4,990'}
+                        {job.script_json?.price_badge ?? '—'}
                       </span>
                     </div>
 
@@ -340,12 +343,21 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
                         job.product_url}
                     </p>
 
+                    {job.error_message || job.stage_detail ? (
+                      <p
+                        className={`truncate text-[10px] ${
+                          job.status === 'FAILED'
+                            ? 'text-red-400'
+                            : 'text-[#A1A1AA]'
+                        }`}
+                      >
+                        {job.error_message ?? job.stage_detail}
+                      </p>
+                    ) : null}
+
                     <div className="flex items-center justify-between text-[10px] text-[#A1A1AA]">
                       <span className="font-mono-code tabular-nums truncate max-w-[190px]">
-                        {job.veo_gcs_uri ??
-                          (job.status === 'FAILED'
-                            ? 'Credit atomically refunded (+1)'
-                            : 'gs://videosaving/renders/pending')}
+                        {job.veo_gcs_uri ?? 'Workspace private storage'}
                       </span>
                       <span className="font-mono-code tabular-nums">
                         {createdTime}
@@ -353,34 +365,53 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
                     </div>
                   </div>
 
-                  {/* Bottom Actions: Load in Preview + Download MP4 */}
-                  <div className="grid grid-cols-2 gap-2 border-t border-[#27272A] pt-2.5">
+                  {/* Bottom Actions */}
+                  <div className="flex flex-wrap gap-2 border-t border-[#27272A] pt-2.5">
                     <button
                       type="button"
                       onClick={() => onSelectJobForPreview(job)}
-                      className="flex items-center justify-center gap-1.5 rounded border border-[#27272A] bg-[#18181B] px-2.5 py-1.5 text-xs font-medium text-[#FAFAFA] transition-colors hover:border-[#6366F1]"
+                      className="flex flex-1 items-center justify-center gap-1.5 rounded border border-[#27272A] bg-[#18181B] px-2.5 py-1.5 text-xs font-medium text-[#FAFAFA] transition-colors hover:border-[#6366F1]"
                     >
                       <Eye className="h-3.5 w-3.5 text-[#6366F1]" />
-                      <span>Load Preview</span>
+                      <span>Preview</span>
                     </button>
 
-                    {job.status === 'COMPLETED' ? (
-                      <a
-                        href={`/api/v1/renders/${job.id}`}
-                        download={`localized-ad-${job.id.slice(0, 8)}.mp4`}
-                        className="flex items-center justify-center gap-1.5 rounded border border-[#6366F1] bg-[#6366F1] px-2.5 py-1.5 text-xs font-semibold text-[#FAFAFA] transition-colors hover:bg-[#5254E8]"
+                    {job.status === 'COMPLETED' && job.final_mp4_url ? (
+                      <>
+                        <a
+                          href={job.final_mp4_url}
+                          download={`localized-ad-${job.id.slice(0, 8)}.mp4`}
+                          className="flex flex-1 items-center justify-center gap-1.5 rounded border border-[#6366F1] bg-[#6366F1] px-2.5 py-1.5 text-xs font-semibold text-[#FAFAFA] transition-colors hover:bg-[#5254E8]"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          <span>MP4</span>
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => onCopySignedUrl(job.id)}
+                          title="Copy Signed Download URL"
+                          className="flex items-center justify-center rounded border border-[#27272A] bg-[#18181B] px-2 py-1.5 text-xs text-[#A1A1AA] hover:border-[#6366F1] hover:text-[#FAFAFA]"
+                        >
+                          <Link className="h-3.5 w-3.5" />
+                        </button>
+                      </>
+                    ) : !isTerminal ? (
+                      <button
+                        type="button"
+                        onClick={() => onCancelJob(job.id)}
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded border border-red-500/60 bg-[#18181B] px-2.5 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/10"
                       >
-                        <Download className="h-3.5 w-3.5" />
-                        <span>Download MP4</span>
-                      </a>
+                        <Ban className="h-3.5 w-3.5" />
+                        <span>Cancel & Refund</span>
+                      </button>
                     ) : (
                       <button
                         type="button"
-                        onClick={onGenerateFirstJob}
-                        className="flex items-center justify-center gap-1.5 rounded border border-[#27272A] bg-[#18181B] px-2.5 py-1.5 text-xs font-medium text-[#A1A1AA] transition-colors hover:border-[#FAFAFA] hover:text-[#FAFAFA]"
+                        onClick={() => onRetryJob(job.id)}
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded border border-[#27272A] bg-[#18181B] px-2.5 py-1.5 text-xs font-medium text-[#A1A1AA] transition-colors hover:border-[#FAFAFA] hover:text-[#FAFAFA]"
                       >
                         <RotateCcw className="h-3.5 w-3.5" />
-                        <span>Re-Run Job</span>
+                        <span>Retry Job</span>
                       </button>
                     )}
                   </div>

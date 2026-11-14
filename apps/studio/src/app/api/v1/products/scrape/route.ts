@@ -3,12 +3,9 @@ import type { AdAngle, SupportedLanguage } from '@video-ad/remotion';
 import {
   AD_ANGLES,
   SUPPORTED_LANGUAGES,
-  getServerPresetAdProps as getPresetAdProps,
+  getServerPresetAdProps,
 } from '@/lib/adPresetsServer';
-import {
-  fetchFromWorker,
-  scrapeProductFallback,
-} from '@/lib/serverStore';
+import { fetchWorker, workerUnavailableResponse } from '@/lib/serverStore';
 import type { ScrapedProductMetadata } from '@/types/studio';
 
 interface ScrapeBody {
@@ -47,16 +44,6 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
 
-  if (productUrl.toLowerCase().includes('error-scrape')) {
-    return NextResponse.json(
-      {
-        detail:
-          'Unable to reach remote D2C storefront (HTTP 503 Gateway Timeout). Please retry.',
-      },
-      { status: 503 }
-    );
-  }
-
   const rawLang = (body.target_language ?? 'ur').trim();
   const targetLanguage: SupportedLanguage = isSupportedLanguage(rawLang)
     ? rawLang
@@ -64,41 +51,53 @@ export async function POST(request: Request): Promise<NextResponse> {
   const rawAngle = (body.ad_angle ?? 'problem_solution').trim();
   const adAngle: AdAngle = isAdAngle(rawAngle) ? rawAngle : 'problem_solution';
 
-  const fallbackMeta = scrapeProductFallback(
-    productUrl,
-    targetLanguage,
-    adAngle
-  );
-
-  const workerRes = await fetchFromWorker('/v1/products/scrape', {
+  const workerRes = await fetchWorker(request, '/v1/products/scrape', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    extraHeaders: { 'content-type': 'application/json' },
+    timeoutMs: 15000,
     body: JSON.stringify({
       product_url: productUrl,
       target_language: targetLanguage,
     }),
   });
 
-  if (workerRes && workerRes.ok) {
-    const workerData = (await workerRes.json()) as ScrapedProductMetadata;
-    const suggested = getPresetAdProps(targetLanguage, adAngle, {
-      productTitle: workerData.title || fallbackMeta.title,
-      brandName: workerData.brand || fallbackMeta.brand,
-      currency: workerData.currency || fallbackMeta.currency,
-      priceDisplay: workerData.price || fallbackMeta.price,
-      originalPriceDisplay: fallbackMeta.original_price,
-      discountBadge: fallbackMeta.discount_badge,
-    });
-    return NextResponse.json(
-      {
-        ...fallbackMeta,
-        ...workerData,
-        target_language: targetLanguage,
-        suggested_props: suggested,
-      },
-      { status: 200 }
-    );
+  if (!workerRes) {
+    return workerUnavailableResponse();
   }
 
-  return NextResponse.json(fallbackMeta, { status: 200 });
+  const rawText = await workerRes.text();
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {};
+  } catch {
+    parsed = { detail: rawText || `Worker returned HTTP ${workerRes.status}` };
+  }
+
+  if (!workerRes.ok) {
+    return NextResponse.json(parsed, { status: workerRes.status });
+  }
+
+  const workerData = parsed as unknown as ScrapedProductMetadata;
+  const scriptScaffolding = getServerPresetAdProps(targetLanguage, adAngle);
+
+  // Never invent unverified factual product fields (title, brand, price, discount).
+  const suggestedProps = {
+    ...scriptScaffolding,
+    productTitle: workerData.title ?? '',
+    brandName: workerData.brand ?? '',
+    currency: workerData.currency ?? '',
+    priceDisplay: workerData.price ?? '',
+    originalPriceDisplay: workerData.original_price ?? '',
+    discountBadge: workerData.discount_badge ?? '',
+    productImageUrl: workerData.image_url || undefined,
+  };
+
+  return NextResponse.json(
+    {
+      ...workerData,
+      target_language: targetLanguage,
+      suggested_props: suggestedProps,
+    },
+    { status: 200 }
+  );
 }

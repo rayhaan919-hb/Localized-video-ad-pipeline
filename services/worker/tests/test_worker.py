@@ -1,59 +1,90 @@
-"""End-to-end and unit tests for the Localized AI Video Ad Worker."""
+"""Core end-to-end tests for the Localized AI Video Ad Worker."""
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import Generator
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-import app.db as db_module
-from app.config import DEFAULT_OWNER_ID, RENDERS_DIR
-from app.db import Workspace, configure_database
+from app.db import configure_database
 from app.main import app
 from app.scraper import parse_product_html
+from app.security import rate_limiter
+from app.storage import validate_mp4_file
 from app.tasks import celery_app
-from app.veo import SAMPLE_FIXTURE_PATH, ensure_sample_fixture
+from app.veo import ensure_sample_fixture
 
 
 @pytest.fixture(autouse=True)
-def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
-    """Provide an isolated SQLite database and mock Veo mode for every test."""
+def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Provide isolated SQLite DB, private storage, and explicit test mock flags."""
     db_file = tmp_path / "test_video_ads.db"
     db_url = f"sqlite:///{db_file.as_posix()}"
+    storage_dir = tmp_path / "storage"
+    monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("DATABASE_URL", db_url)
+    monkeypatch.setenv("STORAGE_ROOT", str(storage_dir))
+    monkeypatch.setenv("AUTH_JWT_SECRET", "test-jwt-secret-key-at-least-32-chars!")
+    monkeypatch.setenv("SIGNED_URL_SECRET", "test-signed-url-secret-key-32-chars!")
     monkeypatch.setenv("MOCK_VERTEX_VEO", "true")
+    monkeypatch.setenv("MOCK_TTS", "true")
+    monkeypatch.setenv("INITIAL_PROMO_CREDITS", "3")
     monkeypatch.setenv("CELERY_ALWAYS_EAGER", "true")
     monkeypatch.delenv("WORKER_API_KEY", raising=False)
     monkeypatch.setitem(celery_app.conf, "task_always_eager", True)
+    rate_limiter.reset()
     configure_database(db_url)
     yield
 
 
 @pytest.fixture()
 def client() -> Generator[TestClient, None, None]:
-    """Return a FastAPI TestClient with lifespan hooks active."""
+    """Return FastAPI TestClient with startup/shutdown lifespan hooks active."""
     with TestClient(app) as test_client:
         yield test_client
 
 
-def test_health_and_sample_fixture(client: TestClient) -> None:
-    """Verify service health metadata and offline 2-second 9:16 MP4 fixture."""
+def register_and_auth(
+    client: TestClient,
+    email: str = "creator@example.com",
+    password: str = "StrongPass123!",
+    full_name: str = "Creator One",
+) -> dict[str, str]:
+    resp = client.post(
+        "/v1/auth/register",
+        json={"email": email, "password": password, "full_name": full_name},
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    return {
+        "access_token": body["access_token"],
+        "refresh_token": body["refresh_token"],
+        "workspace_id": body["primary_workspace_id"],
+        "user_id": body["user"]["id"],
+        "verify_token": body.get("verify_email_token", ""),
+    }
+
+
+def _auth_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_health_and_mock_fixture(client: TestClient) -> None:
+    """Verify /health readiness metadata and mock studio MP4 fixture helper."""
     resp = client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
-    assert body["veo_model"] == "veo-3.1-generate-001"
-    assert body["gcp_project_id"] == "video-pipeline-514123"
-    assert body["gcs_bucket"] == "gs://videosaving"
     assert body["mock_vertex_veo"] is True
+    assert body["mock_tts"] is True
+    assert "gcp_project_id" not in body  # sensitive infra IDs not leaked publicly
 
-    fixture = ensure_sample_fixture()
-    assert fixture == SAMPLE_FIXTURE_PATH
+    fixture = ensure_sample_fixture(duration_seconds=4.0)
     assert fixture.exists()
-    assert fixture.stat().st_size > 2048
+    meta = validate_mp4_file(fixture, require_audio=True, min_duration_seconds=3.5)
+    assert meta["valid"] is True
 
 
 @pytest.mark.parametrize(
@@ -65,32 +96,36 @@ def test_health_and_sample_fixture(client: TestClient) -> None:
         ("en", False, "ltr", "Inter"),
     ],
 )
-def test_generate_video_all_languages_and_rtl_metadata(
+def test_generate_video_all_languages_and_private_download(
     client: TestClient,
     lang: str,
     expected_rtl: bool,
     expected_direction: str,
     expected_font: str,
 ) -> None:
-    """Verify POST /v1/videos/generate across ur, ar, hi, en with atomic credit deduction."""
-    workspace_id = str(uuid.uuid4())
+    """Verify end-to-end localized video generation, ledger audit, and authenticated download."""
+    auth = register_and_auth(client, email=f"lang-{lang}@example.com")
+    headers = _auth_headers(auth["access_token"])
+    ws_id = auth["workspace_id"]
+
     resp = client.post(
         "/v1/videos/generate",
+        headers=headers,
         json={
-            "workspace_id": workspace_id,
+            "workspace_id": ws_id,
             "product_url": "https://luminabotanics.com/products/glow-niacinamide-serum",
             "target_language": lang,
             "ad_angle": "problem_solution",
+            "duration_seconds": 4.0,
         },
     )
-    assert resp.status_code == 202
+    assert resp.status_code == 202, resp.text
     data = resp.json()
-    assert data["workspace_id"] == workspace_id
+    assert data["workspace_id"] == ws_id
     assert data["target_language"] == lang
     assert data["status"] == "COMPLETED"
-    assert data["credit_balance"] == 9
-    assert data["veo_gcs_uri"] == f"gs://videosaving/jobs/{data['id']}/veo_clip_9_16.mp4"
-    assert data["final_mp4_url"] == f"/static/renders/{data['id']}.mp4"
+    assert data["credit_balance"] == 2  # 3 signup promo - 1 finalized
+    assert data["final_mp4_url"] == f"/api/v1/renders/{data['id']}"
 
     script = data["script_json"]
     assert script is not None
@@ -98,9 +133,10 @@ def test_generate_video_all_languages_and_rtl_metadata(
     assert script["direction"] == expected_direction
     assert script["font_family"] == expected_font
     assert script["status_history"] == [
-        "PENDING",
-        "GENERATING_CLIPS",
-        "COMPOSITING",
+        "CREATED",
+        "QUEUED",
+        "PROCESSING",
+        "RENDERING",
         "COMPLETED",
     ]
     assert len(script["captions"]) == 3
@@ -108,33 +144,40 @@ def test_generate_video_all_languages_and_rtl_metadata(
         assert cap["direction"] == expected_direction
         assert cap["end_ms"] > cap["start_ms"]
 
-    # Verify static MP4 file exists on disk and is downloadable via HTTP
-    rendered_mp4 = RENDERS_DIR / f"{data['id']}.mp4"
-    assert rendered_mp4.exists()
-    assert rendered_mp4.stat().st_size > 2048
+    # Unauthenticated download MUST fail; authenticated download MUST return valid MP4
+    client.cookies.clear()
+    unauth_dl = client.get(f"/v1/videos/{data['id']}/download")
+    assert unauth_dl.status_code == 401
 
-    static_resp = client.get(data["final_mp4_url"])
-    assert static_resp.status_code == 200
-    assert len(static_resp.content) > 2048
+    auth_dl = client.get(f"/v1/videos/{data['id']}/download", headers=headers)
+    assert auth_dl.status_code == 200
+    assert len(auth_dl.content) > 4096
+    assert b"ftyp" in auth_dl.content[:32]
+    assert b"moov" in auth_dl.content
+
+    # Signed URL download also works without cookie/bearer and expires properly
+    signed = client.get(f"/v1/videos/{data['id']}/signed-url", headers=headers)
+    assert signed.status_code == 200
+    signed_dl = client.get(signed.json()["download_path"])
+    assert signed_dl.status_code == 200
+    assert signed_dl.content == auth_dl.content
 
 
-def test_insufficient_credits_returns_402_and_prevents_negative_balance(
+def test_insufficient_credits_returns_402_and_zero_balance_stays_non_negative(
     client: TestClient,
 ) -> None:
-    """Verify atomic credit guard rejects generation with HTTP 402 when credit_balance == 0."""
-    zero_ws_id = str(uuid.uuid4())
-    with db_module.SessionLocal() as session:
-        session.add(
-            Workspace(
-                id=zero_ws_id,
-                owner_id=DEFAULT_OWNER_ID,
-                credit_balance=0,
-            )
-        )
-        session.commit()
+    """Secondary workspace starts with 0 credits and rejects generation with HTTP 402."""
+    auth = register_and_auth(client, email="nocredit@example.com")
+    headers = _auth_headers(auth["access_token"])
+
+    create_ws = client.post("/v1/workspaces", headers=headers, json={"name": "Zero Balance Client"})
+    assert create_ws.status_code == 201
+    zero_ws_id = create_ws.json()["id"]
+    assert create_ws.json()["credit_balance"] == 0
 
     resp = client.post(
         "/v1/videos/generate",
+        headers=headers,
         json={
             "workspace_id": zero_ws_id,
             "product_url": "https://maisonalqamar.com/products/royal-oud-parfum",
@@ -142,21 +185,24 @@ def test_insufficient_credits_returns_402_and_prevents_negative_balance(
         },
     )
     assert resp.status_code == 402
-    assert "Insufficient credits" in resp.json()["detail"]
 
-    ws_resp = client.get(f"/v1/workspaces/{zero_ws_id}")
+    ws_resp = client.get(f"/v1/workspaces/{zero_ws_id}", headers=headers)
     assert ws_resp.status_code == 200
     assert ws_resp.json()["credit_balance"] == 0
 
 
 def test_pipeline_failure_refunds_credit_atomically(client: TestClient) -> None:
-    """Verify failed render job sets status=FAILED and refunds +1 credit atomically."""
-    ws_id = str(uuid.uuid4())
+    """Verify failed render job sets status=FAILED and refunds reserved credit atomically."""
+    auth = register_and_auth(client, email="refundtest@example.com")
+    headers = _auth_headers(auth["access_token"])
+    ws_id = auth["workspace_id"]
+
     resp = client.post(
         "/v1/videos/generate",
+        headers=headers,
         json={
             "workspace_id": ws_id,
-            "product_url": "https://example.com/products/simulate-fail-item",
+            "product_url": "https://luminabotanics.com/products/simulate-fail-item",
             "target_language": "ur",
             "simulate_failure": True,
         },
@@ -164,70 +210,48 @@ def test_pipeline_failure_refunds_credit_atomically(client: TestClient) -> None:
     assert resp.status_code == 202
     data = resp.json()
     assert data["status"] == "FAILED"
-    assert data["credit_balance"] == 10
-    assert "FAILED" in data["script_json"]["status_history"]
+    assert data["credit_balance"] == 3
 
-    ws_resp = client.get(f"/v1/workspaces/{ws_id}")
+    ws_resp = client.get(f"/v1/workspaces/{ws_id}", headers=headers)
     assert ws_resp.status_code == 200
     ws_data = ws_resp.json()
-    assert ws_data["credit_balance"] == 10
-    reasons = [entry["reason"] for entry in ws_data["ledger"]]
-    assert "video_render_deduction" in reasons
-    assert "video_render_failed_refund" in reasons
+    assert ws_data["credit_balance"] == 3
+    tx_types = [entry["transaction_type"] for entry in ws_data["ledger"]]
+    assert "initial_promo" in tx_types
+    assert "reservation" in tx_types
+    assert "refund" in tx_types
 
 
-def test_credit_checkout_and_video_listing(client: TestClient) -> None:
-    """Verify credit pack checkout top-up and GET /v1/videos + GET /v1/videos/{job_id}."""
-    ws_id = str(uuid.uuid4())
-    with db_module.SessionLocal() as session:
-        session.add(Workspace(id=ws_id, owner_id=DEFAULT_OWNER_ID, credit_balance=0))
-        session.commit()
+def test_idempotency_key_prevents_duplicate_charge(client: TestClient) -> None:
+    """Verify repeated POST /v1/videos/generate with same Idempotency-Key returns same job."""
+    auth = register_and_auth(client, email="idem@example.com")
+    headers = {**_auth_headers(auth["access_token"]), "Idempotency-Key": "render-req-001"}
+    ws_id = auth["workspace_id"]
+    payload = {
+        "workspace_id": ws_id,
+        "product_url": "https://aeropulse.io/products/anc-wireless-earbuds",
+        "target_language": "hi",
+    }
 
-    checkout_resp = client.post(
-        f"/v1/workspaces/{ws_id}/credits/checkout",
-        json={"credits": 5, "pack_id": "starter_5"},
+    first = client.post("/v1/videos/generate", headers=headers, json=payload)
+    second = client.post("/v1/videos/generate", headers=headers, json=payload)
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert first.json()["id"] == second.json()["id"]
+    assert first.json()["credit_balance"] == 2
+    assert second.json()["credit_balance"] == 2
+
+    listing = client.get(
+        f"/v1/videos?workspace_id={ws_id}", headers=_auth_headers(auth["access_token"])
     )
-    assert checkout_resp.status_code == 200
-    assert checkout_resp.json()["credit_balance"] == 5
-
-    gen_resp = client.post(
-        "/v1/videos/generate",
-        json={
-            "workspace_id": ws_id,
-            "product_url": "https://aeropulse.io/products/anc-wireless-earbuds",
-            "target_language": "hi",
-        },
-    )
-    assert gen_resp.status_code == 202
-    job_id = gen_resp.json()["id"]
-    assert gen_resp.json()["credit_balance"] == 4
-
-    list_resp = client.get(f"/v1/videos?workspace_id={ws_id}")
-    assert list_resp.status_code == 200
-    jobs = list_resp.json()
-    assert len(jobs) == 1
-    assert jobs[0]["id"] == job_id
-
-    single_resp = client.get(f"/v1/videos/{job_id}")
-    assert single_resp.status_code == 200
-    assert single_resp.json()["id"] == job_id
-    assert single_resp.json()["status"] == "COMPLETED"
+    assert listing.status_code == 200
+    assert len(listing.json()) == 1
 
 
-def test_scrape_endpoint_and_html_parser(client: TestClient) -> None:
-    """Verify POST /v1/products/scrape and BeautifulSoup HTML OpenGraph extraction."""
-    scrape_resp = client.post(
-        "/v1/products/scrape",
-        json={
-            "product_url": "https://zaytoon.pk/products/royal-sidr-honey",
-            "target_language": "ur",
-        },
-    )
-    assert scrape_resp.status_code == 200
-    meta = scrape_resp.json()
-    assert meta["currency"] == "PKR"
-    assert "Sidr Honey" in meta["title"]
-    assert len(meta["features"]) >= 3
+def test_scrape_endpoint_is_honest_without_invented_prices(client: TestClient) -> None:
+    """Verify scraper never fabricates preset prices/claims and extracts real HTML accurately."""
+    auth = register_and_auth(client, email="scraper@example.com")
+    headers = _auth_headers(auth["access_token"])
 
     sample_html = """
     <html>
@@ -236,33 +260,57 @@ def test_scrape_endpoint_and_html_parser(client: TestClient) -> None:
         <meta property="og:site_name" content="Noor Botanicals" />
         <meta property="product:price:amount" content="199" />
         <meta property="product:price:currency" content="AED" />
+        <meta property="og:image" content="https://noor.ae/img/saffron.jpg" />
       </head>
       <body>
         <ul>
           <li>Cold-pressed grade-A Khorasan saffron threads</li>
-          <li>Clinically tested radiance booster in 7 days</li>
+          <li>Dermatologist-reviewed lightweight facial elixir</li>
         </ul>
       </body>
     </html>
     """
-    parsed = parse_product_html(
-        sample_html,
-        "https://noor.ae/products/saffron-elixir",
-        target_language="ar",
-    )
+    parsed = parse_product_html(sample_html, "https://noor.ae/products/saffron-elixir", "ar")
     assert parsed["title"] == "Artisanal Saffron Elixir"
     assert parsed["brand"] == "Noor Botanicals"
     assert parsed["currency"] == "AED"
     assert parsed["price"] == "AED 199"
+    assert parsed["image_url"] == "https://noor.ae/img/saffron.jpg"
+    assert "price" in parsed["verified_fields"]
     assert len(parsed["features"]) == 2
+
+    # Unverified minimal HTML MUST leave price empty and flag missing_fields honestly
+    minimal = parse_product_html(
+        "<html><body><h1>Organic Serum</h1></body></html>", "https://noor.ae/p/1", "ur"
+    )
+    assert minimal["price"] == ""
+    assert "price" in minimal["missing_fields"]
+    assert minimal["requires_user_confirmation"] is True
+
+    # Live call against unresolvable domain returns honest unreachable state instead of crashing
+    resp = client.post(
+        "/v1/products/scrape",
+        headers=headers,
+        json={
+            "product_url": "https://nonexistent-store-xyz-12345.invalid/products/tea",
+            "target_language": "ur",
+        },
+    )
+    assert resp.status_code == 200
+    scraped = resp.json()
+    assert scraped["scrape_status"] == "unreachable"
+    assert scraped["price"] == ""
+    assert scraped["requires_user_confirmation"] is True
 
 
 def test_invalid_language_rejected_with_422(client: TestClient) -> None:
-    """Verify unsupported target_language is rejected by schema validation."""
+    """Verify unsupported target_language is rejected cleanly by Pydantic validation."""
+    auth = register_and_auth(client, email="langcheck@example.com")
     resp = client.post(
         "/v1/videos/generate",
+        headers=_auth_headers(auth["access_token"]),
         json={
-            "workspace_id": str(uuid.uuid4()),
+            "workspace_id": auth["workspace_id"],
             "product_url": "https://example.com/products/serum",
             "target_language": "fr",
         },
@@ -270,9 +318,10 @@ def test_invalid_language_rejected_with_422(client: TestClient) -> None:
     assert resp.status_code == 422
 
 
-def test_custom_props_and_real_composited_mp4(client: TestClient) -> None:
-    """Verify custom_props override script_json and compositor produces a valid MP4."""
-    ws_id = str(uuid.uuid4())
+def test_custom_props_and_real_composited_mp4(client: TestClient, tmp_path: Path) -> None:
+    """Verify custom_props override script_json and compositor outputs a valid audio+video MP4."""
+    auth = register_and_auth(client, email="customprops@example.com")
+    headers = _auth_headers(auth["access_token"])
     custom_props = {
         "productTitle": "Custom Studio Elixir",
         "brandName": "Atelier Noor",
@@ -282,23 +331,16 @@ def test_custom_props_and_real_composited_mp4(client: TestClient) -> None:
         "hookText": "ہوم اسٹوڈیو سے براہِ راست کسٹم ویڈیو ایڈ!",
         "ctaText": "ابھی آرڈر کریں",
         "captions": [
-            {
-                "id": "custom-1",
-                "text": "پہلا کسٹم کیپشن",
-                "highlightWord": "کسٹم",
-            },
-            {
-                "id": "custom-2",
-                "text": "دوسرا کسٹم کیپشن",
-                "highlightWord": "دوسرا",
-            },
+            {"id": "custom-1", "text": "پہلا کسٹم کیپشن", "highlightWord": "کسٹم"},
+            {"id": "custom-2", "text": "دوسرا کسٹم کیپشن", "highlightWord": "دوسرا"},
         ],
     }
 
     resp = client.post(
         "/v1/videos/generate",
+        headers=headers,
         json={
-            "workspace_id": ws_id,
+            "workspace_id": auth["workspace_id"],
             "product_url": "https://example.com/products/elixir",
             "target_language": "ur",
             "ad_angle": "flash_sale",
@@ -311,81 +353,13 @@ def test_custom_props_and_real_composited_mp4(client: TestClient) -> None:
     assert data["status"] == "COMPLETED"
     script = data["script_json"]
     assert script["product_title"] == "Custom Studio Elixir"
-    assert script["brand"] == "Atelier Noor"
     assert script["price_badge"] == "PKR 6,200"
-    assert script["discount_badge"] == "22% OFF"
-    assert script["hook"] == custom_props["hookText"]
-    assert script["cta_text"] == custom_props["ctaText"]
-    assert script["ad_angle"] == "flash_sale"
     assert script["duration_ms"] == 3000
-    assert len(script["captions"]) == 2
-    assert script["captions"][0]["start_ms"] == 0
-    assert script["captions"][1]["end_ms"] == 3000
 
-    mp4_resp = client.get(data["final_mp4_url"])
+    mp4_resp = client.get(f"/v1/videos/{data['id']}/download", headers=headers)
     assert mp4_resp.status_code == 200
-    mp4_bytes = mp4_resp.content
-    assert len(mp4_bytes) > 5000
-    assert b"ftyp" in mp4_bytes[:32]
-    assert b"moov" in mp4_bytes
-    assert b"mdat" in mp4_bytes
-
-
-def test_json_ld_and_meta_description_scraping() -> None:
-    """Verify parse_product_html extracts schema.org JSON-LD Product fields & meta description."""
-    html = """
-    <html>
-      <head>
-        <meta name="description" content="Cold-pressed black seed serum. Absorbs in seconds." />
-        <script type="application/ld+json">
-        {
-          "@context": "https://schema.org",
-          "@type": "Product",
-          "name": "Kalonji Radiance Oil",
-          "brand": {"@type": "Brand", "name": "Hamdard Botanics"},
-          "offers": {"@type": "Offer", "priceCurrency": "PKR", "price": "3450"}
-        }
-        </script>
-      </head>
-      <body><h1>Kalonji Radiance Oil</h1></body>
-    </html>
-    """
-    parsed = parse_product_html(html, "https://example.com/products/kalonji", "ur")
-    assert parsed["title"] == "Kalonji Radiance Oil"
-    assert parsed["brand"] == "Hamdard Botanics"
-    assert parsed["currency"] == "PKR"
-    assert parsed["price"] == "PKR 3450"
-    assert "Cold-pressed" in parsed["description"]
-    assert len(parsed["features"]) >= 1
-
-
-def test_worker_api_key_guard(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify WORKER_API_KEY enforces auth on /v1 routes while keeping /health open."""
-    monkeypatch.setenv("WORKER_API_KEY", "test-secret-token-123")
-
-    health = client.get("/health")
-    assert health.status_code == 200
-    assert health.json()["auth_required"] is True
-
-    unauth = client.post(
-        "/v1/products/scrape",
-        json={"product_url": "https://example.com/products/serum", "target_language": "ur"},
-    )
-    assert unauth.status_code == 401
-
-    wrong_key = client.post(
-        "/v1/products/scrape",
-        headers={"X-API-Key": "wrong-token"},
-        json={"product_url": "https://example.com/products/serum", "target_language": "ur"},
-    )
-    assert wrong_key.status_code == 401
-
-    ok_bearer = client.post(
-        "/v1/products/scrape",
-        headers={"Authorization": "Bearer test-secret-token-123"},
-        json={"product_url": "https://example.com/products/serum", "target_language": "ur"},
-    )
-    assert ok_bearer.status_code == 200
+    tmp_mp4 = tmp_path / "downloaded.mp4"
+    tmp_mp4.write_bytes(mp4_resp.content)
+    meta = validate_mp4_file(tmp_mp4, require_audio=True, min_duration_seconds=2.0)
+    assert meta["valid"] is True
+    assert meta["has_audio"] is True

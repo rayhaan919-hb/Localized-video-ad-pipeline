@@ -2,9 +2,11 @@ import { createBrowserClient } from '@supabase/ssr';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { CreditPackageTier } from '@/types/studio';
 
-export const DEFAULT_WORKSPACE_ID = '00000000-0000-0000-0000-000000000001';
-export const DEFAULT_OWNER_ID = '00000000-0000-0000-0000-000000000099';
-
+/**
+ * Authoritative package metadata displayed in Studio UI.
+ * Note: Pricing, Stripe price IDs, and credit grants are strictly enforced server-side
+ * by the Python worker based on `pack_id`. Client-submitted totals or amounts are ignored.
+ */
 export const CREDIT_PACKAGE_TIERS: readonly CreditPackageTier[] = [
   {
     id: 'starter_10',
@@ -12,7 +14,7 @@ export const CREDIT_PACKAGE_TIERS: readonly CreditPackageTier[] = [
     credits: 10,
     priceUsd: '$9.00',
     perCreditUsd: '$0.90 / ad',
-    description: '10 Veo 3.1 + Remotion 9:16 localized D2C renders',
+    description: '10 Veo 3.1 + Remotion localized D2C renders',
   },
   {
     id: 'growth_50',
@@ -46,8 +48,8 @@ export function getSupabaseConnectionInfo(): SupabaseConnectionInfo {
 
   return {
     configured,
-    modeLabel: configured ? 'SUPABASE RLS · LIVE' : 'LOCAL LEDGER · RLS READY',
-    projectUrl: configured ? url : 'postgresql://localhost:5432/video_ads',
+    modeLabel: configured ? 'SUPABASE RLS · LIVE' : 'WORKER JWT · RLS ISOLATED',
+    projectUrl: configured ? url : 'FastAPI Multi-Tenant Auth & Ledger',
   };
 }
 

@@ -11,13 +11,11 @@ import {
   History,
   RotateCcw,
   ShieldCheck,
+  Wrench,
   X,
 } from 'lucide-react';
 import { CREDIT_PACKAGE_TIERS } from '@/lib/supabase';
-import type {
-  CreditLedgerEntry,
-  ViewStateMode,
-} from '@/types/studio';
+import type { CreditLedgerEntry, ViewStateMode } from '@/types/studio';
 
 interface CreditCheckoutModalProps {
   isOpen: boolean;
@@ -29,7 +27,8 @@ interface CreditCheckoutModalProps {
   isCheckingOutPackId: string | null;
   creditsError: string | null;
   viewStateMode: ViewStateMode;
-  onCheckoutCredits: (credits: number, packId: string) => void;
+  onCheckoutCredits: (packId: string) => void;
+  onDevTopup?: (packId: string) => void;
   onRetryFetchCredits: () => void;
 }
 
@@ -44,6 +43,7 @@ export const CreditCheckoutModal: React.FC<CreditCheckoutModalProps> = ({
   creditsError,
   viewStateMode,
   onCheckoutCredits,
+  onDevTopup,
   onRetryFetchCredits,
 }) => {
   if (!isOpen) {
@@ -59,25 +59,22 @@ export const CreditCheckoutModal: React.FC<CreditCheckoutModalProps> = ({
     <div
       role="dialog"
       aria-modal="true"
-      aria-labelledby="credit-modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[#09090B]/85 p-4"
+      aria-label="Workspace Credit Billing and Ledger"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
     >
-      <div className="flex max-h-[90vh] w-full max-w-[840px] flex-col justify-between overflow-y-auto rounded border border-[#27272A] bg-[#18181B] p-6">
+      <div className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded border border-[#27272A] bg-[#18181B] p-6">
         {/* Modal Header */}
-        <div className="flex items-center justify-between border-b border-[#27272A] pb-4">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded border border-[#6366F1] bg-[#09090B]">
-              <CreditCard className="h-4 w-4 text-[#6366F1]" />
+        <div className="flex items-start justify-between border-b border-[#27272A] pb-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded border border-[#27272A] bg-[#09090B]">
+              <CreditCard className="h-5 w-5 text-[#6366F1]" />
             </div>
             <div>
-              <h2
-                id="credit-modal-title"
-                className="text-base font-semibold text-[#FAFAFA]"
-              >
-                Workspace Credit Checkout & Atomic Ledger
+              <h2 className="text-base font-semibold text-[#FAFAFA]">
+                Workspace Credit Billing & Atomic Ledger
               </h2>
               <p className="font-mono-code tabular-nums text-xs text-[#A1A1AA]">
-                WS: {workspaceId} · CHECK (credit_balance &gt;= 0)
+                WORKSPACE {workspaceId}
               </p>
             </div>
           </div>
@@ -85,14 +82,14 @@ export const CreditCheckoutModal: React.FC<CreditCheckoutModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close Credit Checkout Modal"
-            className="flex h-8 w-8 items-center justify-center rounded border border-[#27272A] bg-[#09090B] text-[#A1A1AA] transition-colors hover:border-[#FAFAFA] hover:text-[#FAFAFA]"
+            aria-label="Close billing modal"
+            className="rounded border border-[#27272A] bg-[#09090B] p-1.5 text-[#A1A1AA] transition-colors hover:border-[#FAFAFA] hover:text-[#FAFAFA]"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        {/* Current Balance Banner */}
+        {/* Balance Banner */}
         <div className="mt-4 flex flex-wrap items-center justify-between gap-4 rounded border border-[#27272A] bg-[#09090B] p-4">
           <div className="flex items-center gap-3">
             <Coins className="h-5 w-5 text-[#6366F1]" />
@@ -109,13 +106,13 @@ export const CreditCheckoutModal: React.FC<CreditCheckoutModalProps> = ({
           <div className="flex items-center gap-2 rounded border border-[#27272A] bg-[#18181B] px-3 py-1.5 text-xs text-[#A1A1AA]">
             <ShieldCheck className="h-4 w-4 text-[#6366F1]" />
             <span>
-              1 Credit = 1 Veo 3.1 + Remotion 9:16 Render (Auto-refunded on
-              failure)
+              Credits are granted strictly after verified Stripe webhook
+              settlement.
             </span>
           </div>
         </div>
 
-        {/* Inline Error Banner with Retry Button */}
+        {/* Error Banner */}
         {showError ? (
           <div
             role="alert"
@@ -125,7 +122,7 @@ export const CreditCheckoutModal: React.FC<CreditCheckoutModalProps> = ({
               <AlertTriangle className="h-4 w-4 text-red-400" />
               <p className="text-xs text-[#FAFAFA]">
                 {creditsError ??
-                  'Failed to synchronize workspace credit ledger from Supabase / Worker.'}
+                  'Failed to synchronize workspace credit ledger.'}
               </p>
             </div>
             <button
@@ -139,14 +136,14 @@ export const CreditCheckoutModal: React.FC<CreditCheckoutModalProps> = ({
           </div>
         ) : null}
 
-        {/* Credit Package Tiers */}
+        {/* Server-Authoritative Credit Packages */}
         <div className="mt-6">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-[#A1A1AA]">
-              Instant Credit Top-Up Packages
+              Stripe Checkout Packages (Server-Verified Pricing)
             </h3>
             <span className="font-mono-code tabular-nums text-xs text-[#A1A1AA]">
-              STRIPE / SUPABASE ATOMIC CHECKOUT
+              IDEMPOTENT WEBHOOK GRANTS
             </span>
           </div>
 
@@ -195,26 +192,40 @@ export const CreditCheckoutModal: React.FC<CreditCheckoutModalProps> = ({
                     </p>
                   </div>
 
-                  <button
-                    type="button"
-                    disabled={Boolean(isCheckingOutPackId)}
-                    onClick={() => onCheckoutCredits(tier.credits, tier.id)}
-                    className="mt-4 flex w-full items-center justify-center gap-1.5 rounded border border-[#6366F1] bg-[#6366F1] px-3 py-2 text-xs font-semibold text-[#FAFAFA] transition-colors hover:bg-[#5254E8] disabled:opacity-50"
-                  >
-                    <Check className="h-3.5 w-3.5" />
-                    <span className="tabular-nums">
-                      {isBusy
-                        ? 'Processing…'
-                        : `Add ${tier.credits} Credits (${tier.priceUsd})`}
-                    </span>
-                  </button>
+                  <div className="mt-4 flex flex-col gap-1.5">
+                    <button
+                      type="button"
+                      disabled={Boolean(isCheckingOutPackId)}
+                      onClick={() => onCheckoutCredits(tier.id)}
+                      className="flex w-full items-center justify-center gap-1.5 rounded border border-[#6366F1] bg-[#6366F1] px-3 py-2 text-xs font-semibold text-[#FAFAFA] transition-colors hover:bg-[#5254E8] disabled:opacity-50"
+                    >
+                      <Check className="h-3.5 w-3.5" />
+                      <span className="tabular-nums">
+                        {isBusy
+                          ? 'Redirecting to Stripe…'
+                          : `Checkout ${tier.credits} Credits (${tier.priceUsd})`}
+                      </span>
+                    </button>
+
+                    {onDevTopup && process.env.NODE_ENV !== 'production' ? (
+                      <button
+                        type="button"
+                        disabled={Boolean(isCheckingOutPackId)}
+                        onClick={() => onDevTopup(tier.id)}
+                        className="flex w-full items-center justify-center gap-1 rounded border border-[#27272A] bg-[#18181B] px-2 py-1 text-[10px] text-[#A1A1AA] hover:border-[#6366F1] hover:text-[#FAFAFA]"
+                      >
+                        <Wrench className="h-3 w-3" />
+                        <span>Dev Top-Up (requires ENABLE_DEV_TOPUP=true)</span>
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               );
             })}
           </div>
         </div>
 
-        {/* Atomic Credit Ledger History Table */}
+        {/* Atomic Credit Ledger Audit Trail */}
         <div className="mt-6 border-t border-[#27272A] pt-4">
           <div className="mb-3 flex items-center justify-between">
             <span className="flex items-center gap-1.5 text-xs font-semibold text-[#FAFAFA]">
@@ -222,7 +233,7 @@ export const CreditCheckoutModal: React.FC<CreditCheckoutModalProps> = ({
               <span>Atomic Credit Ledger Audit Trail</span>
             </span>
             <span className="font-mono-code tabular-nums text-xs text-[#A1A1AA]">
-              {ledger.length} ENTRIES
+              {ledger.length} TRANSACTIONS
             </span>
           </div>
 
@@ -241,31 +252,33 @@ export const CreditCheckoutModal: React.FC<CreditCheckoutModalProps> = ({
               <p className="text-xs text-[#A1A1AA]">
                 No credit ledger transactions recorded for this workspace yet.
               </p>
-              <button
-                type="button"
-                onClick={() => onCheckoutCredits(10, 'starter_10')}
-                className="rounded border border-[#6366F1] bg-[#6366F1] px-3 py-1.5 text-xs font-semibold text-[#FAFAFA]"
-              >
-                Top Up 10 Starter Credits
-              </button>
             </div>
           ) : (
-            <div className="max-h-48 overflow-y-auto rounded border border-[#27272A] bg-[#09090B]">
+            <div className="max-h-56 overflow-y-auto rounded border border-[#27272A] bg-[#09090B]">
               <table className="w-full border-collapse text-left text-xs">
                 <thead>
                   <tr className="border-b border-[#27272A] bg-[#18181B] text-[11px] text-[#A1A1AA]">
+                    <th className="py-2 px-3 font-medium">Type</th>
                     <th className="py-2 px-3 font-medium">Delta</th>
                     <th className="py-2 px-3 font-medium">Reason</th>
-                    <th className="py-2 px-3 font-medium">Job Reference</th>
-                    <th className="py-2 px-3 font-medium">Balance After</th>
+                    <th className="py-2 px-3 font-medium">Ref</th>
+                    <th className="py-2 px-3 font-medium">Balance</th>
                     <th className="py-2 px-3 font-medium">Timestamp</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#27272A]">
                   {ledger.map((entry) => {
                     const isPositive = entry.delta > 0;
+                    const refLabel = entry.job_id
+                      ? `job:#${entry.job_id.slice(0, 8)}`
+                      : entry.payment_id
+                      ? `pay:${entry.payment_id.slice(0, 10)}`
+                      : '—';
                     return (
                       <tr key={entry.id} className="hover:bg-[#18181B]/60">
+                        <td className="font-mono-code py-2 px-3 text-[11px] text-[#A1A1AA]">
+                          {entry.transaction_type ?? 'ledger'}
+                        </td>
                         <td className="font-mono-code tabular-nums py-2 px-3 font-semibold">
                           <span
                             className={`inline-flex items-center gap-1 ${
@@ -284,7 +297,7 @@ export const CreditCheckoutModal: React.FC<CreditCheckoutModalProps> = ({
                           {entry.reason}
                         </td>
                         <td className="font-mono-code tabular-nums py-2 px-3 text-[#A1A1AA]">
-                          {entry.job_id ? `#${entry.job_id.slice(0, 8)}` : '—'}
+                          {refLabel}
                         </td>
                         <td className="font-mono-code tabular-nums py-2 px-3 font-semibold text-[#FAFAFA]">
                           {entry.balance_after}

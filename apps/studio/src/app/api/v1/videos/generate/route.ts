@@ -6,10 +6,11 @@ import type {
 } from '@video-ad/remotion';
 import { AD_ANGLES, SUPPORTED_LANGUAGES } from '@/lib/adPresetsServer';
 import {
-  createVideoJobFallback,
-  fetchFromWorker,
+  fetchWorker,
+  forwardWorkerJsonResponse,
+  normalizeVideoJob,
+  workerUnavailableResponse,
 } from '@/lib/serverStore';
-import { DEFAULT_WORKSPACE_ID } from '@/lib/supabase';
 import type { VideoJobRecord } from '@/types/studio';
 
 interface GenerateRequestBody {
@@ -17,8 +18,9 @@ interface GenerateRequestBody {
   product_url?: string;
   target_language?: string;
   ad_angle?: string;
-  simulate_failure?: boolean;
+  aspect_ratio?: '9:16' | '16:9';
   duration_seconds?: number;
+  simulate_failure?: boolean;
   custom_props?: {
     productTitle?: string;
     brandName?: string;
@@ -27,6 +29,8 @@ interface GenerateRequestBody {
     discountBadge?: string;
     hookText?: string;
     ctaText?: string;
+    productImageUrl?: string;
+    productImageAssetId?: string;
     captions?: CaptionSegment[];
   };
 }
@@ -50,10 +54,18 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
 
-  const workspaceId = (body.workspace_id ?? DEFAULT_WORKSPACE_ID).trim();
+  const workspaceId = (body.workspace_id ?? '').trim();
+  if (!workspaceId) {
+    return NextResponse.json(
+      { detail: 'Authenticated workspace_id is required.' },
+      { status: 422 }
+    );
+  }
+
   const productUrl = (body.product_url ?? '').trim();
   const rawLang = (body.target_language ?? 'ur').trim();
   const rawAngle = (body.ad_angle ?? 'problem_solution').trim();
+  const aspectRatio = body.aspect_ratio === '16:9' ? '16:9' : '9:16';
 
   if (!productUrl || !/^https?:\/\/.+/i.test(productUrl)) {
     return NextResponse.json(
@@ -70,64 +82,38 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   const adAngle: AdAngle = isAdAngle(rawAngle) ? rawAngle : 'problem_solution';
+  const durationSeconds =
+    typeof body.duration_seconds === 'number' &&
+    Number.isFinite(body.duration_seconds)
+      ? Math.max(2, Math.min(15, body.duration_seconds))
+      : 4;
 
   const customProps =
     body.custom_props && typeof body.custom_props === 'object'
-      ? (body.custom_props as Record<string, unknown>)
+      ? body.custom_props
       : undefined;
-  const durationSeconds =
-    typeof body.duration_seconds === 'number' && Number.isFinite(body.duration_seconds)
-      ? Math.max(2, Math.min(15, body.duration_seconds))
-      : 2;
 
-  // First try proxying to the FastAPI worker if reachable
-  const workerRes = await fetchFromWorker(
-    '/v1/videos/generate',
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        workspace_id: workspaceId,
-        product_url: productUrl,
-        target_language: rawLang,
-        ad_angle: adAngle,
-        simulate_failure: Boolean(body.simulate_failure),
-        duration_seconds: durationSeconds,
-        ...(customProps ? { custom_props: customProps } : {}),
-      }),
-    },
-    15000
-  );
-
-  if (workerRes) {
-    const workerData = (await workerRes.json()) as VideoJobRecord & {
-      detail?: string;
-    };
-    if (!workerRes.ok) {
-      return NextResponse.json(workerData, { status: workerRes.status });
-    }
-    if (workerData.final_mp4_url?.startsWith('/static/renders/')) {
-      workerData.final_mp4_url = `/api/v1/renders/${workerData.id}`;
-    }
-    return NextResponse.json(workerData, { status: 202 });
-  }
-
-  // Fallback to deterministic studio store with atomic credit deduction
-  const result = createVideoJobFallback({
-    workspaceId,
-    productUrl,
-    targetLanguage: rawLang,
-    adAngle,
-    simulateFailure: Boolean(body.simulate_failure),
-    customProps: body.custom_props,
+  const workerRes = await fetchWorker(request, '/v1/videos/generate', {
+    method: 'POST',
+    extraHeaders: { 'content-type': 'application/json' },
+    timeoutMs: 30000,
+    body: JSON.stringify({
+      workspace_id: workspaceId,
+      product_url: productUrl,
+      target_language: rawLang,
+      ad_angle: adAngle,
+      aspect_ratio: aspectRatio,
+      duration_seconds: durationSeconds,
+      simulate_failure: Boolean(body.simulate_failure),
+      ...(customProps ? { custom_props: customProps } : {}),
+    }),
   });
 
-  if (!result.ok) {
-    return NextResponse.json(
-      { detail: result.detail, credit_balance: result.workspace.credit_balance },
-      { status: result.status }
-    );
+  if (!workerRes) {
+    return workerUnavailableResponse();
   }
 
-  return NextResponse.json(result.job, { status: 202 });
+  return forwardWorkerJsonResponse(workerRes, {
+    transformPayload: (data) => normalizeVideoJob(data as VideoJobRecord),
+  });
 }

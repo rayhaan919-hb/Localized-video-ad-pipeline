@@ -1,10 +1,12 @@
-"""Configuration settings for the Localized AI Video Ad Worker."""
+"""Configuration settings and production validation for the Localized AI Video Ad Worker."""
 
 from __future__ import annotations
 
 import os
+import secrets
 import socket
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,9 +17,52 @@ FIXTURES_DIR = WORKER_ROOT / "fixtures"
 STATIC_DIR = WORKER_ROOT / "static"
 RENDERS_DIR = STATIC_DIR / "renders"
 AUDIO_DIR = STATIC_DIR / "audio"
+STORAGE_DIR = WORKER_ROOT / "storage"
 
-DEFAULT_WORKSPACE_ID = "00000000-0000-0000-0000-000000000001"
-DEFAULT_OWNER_ID = "00000000-0000-0000-0000-000000000099"
+# Process-local ephemeral secrets used strictly in development/test when unset in env.
+_DEV_EPHEMERAL_JWT_SECRET = secrets.token_hex(32)
+_DEV_EPHEMERAL_SIGNED_URL_SECRET = secrets.token_hex(32)
+
+CREDIT_PACKAGES: dict[str, dict[str, Any]] = {
+    "starter_10": {
+        "pack_id": "starter_10",
+        "name": "Starter Pack",
+        "credits": 10,
+        "amount_cents": 900,
+        "currency": "usd",
+        "price_env_key": "STRIPE_PRICE_STARTER_10",
+    },
+    "growth_50": {
+        "pack_id": "growth_50",
+        "name": "Growth Pack",
+        "credits": 50,
+        "amount_cents": 3900,
+        "currency": "usd",
+        "price_env_key": "STRIPE_PRICE_GROWTH_50",
+    },
+    "scale_200": {
+        "pack_id": "scale_200",
+        "name": "Scale Pack",
+        "credits": 200,
+        "amount_cents": 12900,
+        "currency": "usd",
+        "price_env_key": "STRIPE_PRICE_SCALE_200",
+    },
+}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return int(default)
+    return int(raw.strip())
 
 
 def _is_host_port_reachable(host: str, port: int, timeout: float = 0.2) -> bool:
@@ -29,28 +74,34 @@ def _is_host_port_reachable(host: str, port: int, timeout: float = 0.2) -> bool:
         return False
 
 
-def resolve_database_url(raw_url: str | None) -> str:
-    """Resolve DATABASE_URL, falling back to local SQLite if localhost Postgres is offline."""
+def resolve_database_url(raw_url: str | None, app_env: str = "development") -> str:
+    """Resolve DATABASE_URL.
+
+    In production, PostgreSQL URLs are never silently downgraded to SQLite.
+    In development/test, unreachable localhost PostgreSQL falls back to local SQLite.
+    """
     default_sqlite = f"sqlite:///{(WORKER_ROOT / 'video_ads.db').as_posix()}"
-    if not raw_url:
+    cleaned = (raw_url or "").strip()
+    if not cleaned:
+        if app_env == "production":
+            return ""
         return default_sqlite
 
-    if raw_url.startswith(("postgresql://", "postgres://")):
-        parsed = urlparse(raw_url)
+    if cleaned.startswith("postgres://"):
+        cleaned = cleaned.replace("postgres://", "postgresql://", 1)
+
+    if cleaned.startswith("postgresql://") and app_env != "production":
+        parsed = urlparse(cleaned)
         host = parsed.hostname or "localhost"
         port = parsed.port or 5432
         if host in ("localhost", "127.0.0.1") and not _is_host_port_reachable(host, port):
             return default_sqlite
-        if raw_url.startswith("postgres://"):
-            return raw_url.replace("postgres://", "postgresql://", 1)
-    return raw_url
+
+    return cleaned
 
 
 def is_redis_reachable(redis_url: str, timeout: float = 0.25) -> bool:
     """Return True if the configured Redis host/port accepts TCP connections."""
-    import socket
-    from urllib.parse import urlparse
-
     if not redis_url or redis_url.startswith("memory://"):
         return False
     parsed = urlparse(redis_url)
@@ -58,11 +109,7 @@ def is_redis_reachable(redis_url: str, timeout: float = 0.25) -> bool:
     if not host:
         return False
     port = parsed.port or 6379
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
+    return _is_host_port_reachable(host, port, timeout=timeout)
 
 
 class Settings(BaseSettings):
@@ -74,34 +121,89 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    APP_ENV: str = "development"
     DATABASE_URL: str = ""
-    GCP_PROJECT_ID: str = "video-pipeline-514123"
-    GCS_BUCKET: str = "gs://videosaving"
+    GCP_PROJECT_ID: str = ""
+    VERTEX_LOCATION: str = "us-central1"
+    GCS_BUCKET: str = ""
     VEO_MODEL: str = "veo-3.1-generate-001"
-    MOCK_VERTEX_VEO: bool = True
+    MOCK_VERTEX_VEO: bool = False
+    MOCK_TTS: bool = False
     REDIS_URL: str = "redis://localhost:6379/0"
     WORKER_API_KEY: str = ""
-    CORS_ORIGINS: str = "*"
+    ADMIN_ADJUST_SECRET: str = ""
+    AUTH_JWT_SECRET: str = ""
+    SIGNED_URL_SECRET: str = ""
+    SUPABASE_URL: str = ""
+    SUPABASE_JWT_SECRET: str = ""
+    CORS_ORIGINS: str = "http://localhost:3000"
+    ALLOW_WILDCARD_CORS: bool = False
+    FRONTEND_APP_URL: str = "http://localhost:3000"
     GOOGLE_API_KEY: str = ""
     VERTEX_ACCESS_TOKEN: str = ""
     GOOGLE_APPLICATION_CREDENTIALS: str = ""
+    GOOGLE_CLOUD_TTS_ENDPOINT: str = "https://texttospeech.googleapis.com/v1/text:synthesize"
     STRIPE_SECRET_KEY: str = ""
     STRIPE_WEBHOOK_SECRET: str = ""
+    STRIPE_CURRENCY: str = "usd"
+    STRIPE_PRICE_STARTER_10: str = ""
+    STRIPE_PRICE_GROWTH_50: str = ""
+    STRIPE_PRICE_SCALE_200: str = ""
+    INITIAL_PROMO_CREDITS: int = 3
+    ENABLE_DEV_TOPUP: bool = False
+    ACCESS_TOKEN_TTL_SECONDS: int = 900
+    REFRESH_TOKEN_TTL_SECONDS: int = 60 * 60 * 24 * 14
+    PASSWORD_RESET_TTL_SECONDS: int = 1800
+    EMAIL_VERIFY_TTL_SECONDS: int = 86400
+    SIGNED_URL_TTL_SECONDS: int = 3600
+    MAX_REQUEST_BODY_BYTES: int = 10 * 1024 * 1024
+    MAX_ASSET_UPLOAD_BYTES: int = 8 * 1024 * 1024
+    RATE_LIMIT_AUTH_PER_MINUTE: int = 15
+    RATE_LIMIT_API_PER_MINUTE: int = 120
+    AUTH_LOCKOUT_MAX_ATTEMPTS: int = 5
+    AUTH_LOCKOUT_WINDOW_SECONDS: int = 900
+    STORAGE_ROOT: str = str(STORAGE_DIR)
     USE_REMOTION_CLI: bool = False
-    DEFAULT_DURATION_SECONDS: float = 2.0
+    DEFAULT_DURATION_SECONDS: float = 4.0
+
+    @property
+    def effective_app_env(self) -> str:
+        raw = os.environ.get("APP_ENV")
+        val = (raw if raw is not None else self.APP_ENV).strip().lower()
+        return val or "development"
+
+    @property
+    def is_production(self) -> bool:
+        return self.effective_app_env == "production"
 
     @property
     def effective_database_url(self) -> str:
         env_override = os.environ.get("DATABASE_URL")
         url_to_check = env_override if env_override is not None else self.DATABASE_URL
-        return resolve_database_url(url_to_check)
+        return resolve_database_url(url_to_check, app_env=self.effective_app_env)
 
     @property
     def is_mock_veo(self) -> bool:
-        env_val = os.environ.get("MOCK_VERTEX_VEO")
-        if env_val is not None:
-            return env_val.strip().lower() in ("1", "true", "yes", "on")
-        return bool(self.MOCK_VERTEX_VEO)
+        return _env_bool("MOCK_VERTEX_VEO", self.MOCK_VERTEX_VEO)
+
+    @property
+    def is_mock_tts(self) -> bool:
+        return _env_bool("MOCK_TTS", self.MOCK_TTS)
+
+    @property
+    def effective_gcp_project_id(self) -> str:
+        env_val = os.environ.get("GCP_PROJECT_ID")
+        return (env_val if env_val is not None else self.GCP_PROJECT_ID).strip()
+
+    @property
+    def effective_gcs_bucket(self) -> str:
+        env_val = os.environ.get("GCS_BUCKET")
+        return (env_val if env_val is not None else self.GCS_BUCKET).strip()
+
+    @property
+    def effective_vertex_location(self) -> str:
+        env_val = os.environ.get("VERTEX_LOCATION")
+        return (env_val if env_val is not None else self.VERTEX_LOCATION).strip() or "us-central1"
 
     @property
     def effective_worker_api_key(self) -> str:
@@ -109,12 +211,51 @@ class Settings(BaseSettings):
         return (env_val if env_val is not None else self.WORKER_API_KEY).strip()
 
     @property
+    def effective_admin_adjust_secret(self) -> str:
+        env_val = os.environ.get("ADMIN_ADJUST_SECRET")
+        return (env_val if env_val is not None else self.ADMIN_ADJUST_SECRET).strip()
+
+    @property
+    def effective_auth_jwt_secret(self) -> str:
+        env_val = os.environ.get("AUTH_JWT_SECRET")
+        configured = (env_val if env_val is not None else self.AUTH_JWT_SECRET).strip()
+        if configured:
+            return configured
+        if self.is_production:
+            return ""
+        return _DEV_EPHEMERAL_JWT_SECRET
+
+    @property
+    def effective_supabase_jwt_secret(self) -> str:
+        env_val = os.environ.get("SUPABASE_JWT_SECRET")
+        return (env_val if env_val is not None else self.SUPABASE_JWT_SECRET).strip()
+
+    @property
+    def effective_signed_url_secret(self) -> str:
+        env_val = os.environ.get("SIGNED_URL_SECRET")
+        configured = (env_val if env_val is not None else self.SIGNED_URL_SECRET).strip()
+        if configured:
+            return configured
+        if self.effective_auth_jwt_secret:
+            return self.effective_auth_jwt_secret
+        if self.is_production:
+            return ""
+        return _DEV_EPHEMERAL_SIGNED_URL_SECRET
+
+    @property
     def effective_cors_origins(self) -> list[str]:
         env_val = os.environ.get("CORS_ORIGINS")
         raw = (env_val if env_val is not None else self.CORS_ORIGINS).strip()
-        if not raw or raw == "*":
+        if not raw:
+            return []
+        if raw == "*":
             return ["*"]
         return [item.strip() for item in raw.split(",") if item.strip()]
+
+    @property
+    def effective_frontend_app_url(self) -> str:
+        env_val = os.environ.get("FRONTEND_APP_URL")
+        return (env_val if env_val is not None else self.FRONTEND_APP_URL).strip().rstrip("/")
 
     @property
     def effective_google_api_key(self) -> str:
@@ -127,19 +268,115 @@ class Settings(BaseSettings):
         return (env_val if env_val is not None else self.VERTEX_ACCESS_TOKEN).strip()
 
     @property
+    def effective_google_application_credentials(self) -> str:
+        env_val = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        return (env_val if env_val is not None else self.GOOGLE_APPLICATION_CREDENTIALS).strip()
+
+    @property
     def effective_stripe_secret_key(self) -> str:
         env_val = os.environ.get("STRIPE_SECRET_KEY")
         return (env_val if env_val is not None else self.STRIPE_SECRET_KEY).strip()
 
     @property
+    def effective_stripe_webhook_secret(self) -> str:
+        env_val = os.environ.get("STRIPE_WEBHOOK_SECRET")
+        return (env_val if env_val is not None else self.STRIPE_WEBHOOK_SECRET).strip()
+
+    @property
+    def effective_initial_promo_credits(self) -> int:
+        return max(0, _env_int("INITIAL_PROMO_CREDITS", self.INITIAL_PROMO_CREDITS))
+
+    @property
+    def effective_enable_dev_topup(self) -> bool:
+        if self.is_production:
+            return False
+        return _env_bool("ENABLE_DEV_TOPUP", self.ENABLE_DEV_TOPUP)
+
+    @property
+    def effective_storage_root(self) -> Path:
+        env_val = os.environ.get("STORAGE_ROOT")
+        raw = (env_val if env_val is not None else self.STORAGE_ROOT).strip()
+        path = Path(raw) if raw else STORAGE_DIR
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
     def use_remotion_cli(self) -> bool:
-        env_val = os.environ.get("USE_REMOTION_CLI")
+        return _env_bool("USE_REMOTION_CLI", self.USE_REMOTION_CLI)
+
+    def get_stripe_price_id(self, pack_id: str) -> str:
+        pkg = CREDIT_PACKAGES.get(pack_id)
+        if not pkg:
+            return ""
+        env_key = str(pkg["price_env_key"])
+        env_val = os.environ.get(env_key)
         if env_val is not None:
-            return env_val.strip().lower() in ("1", "true", "yes", "on")
-        return bool(self.USE_REMOTION_CLI)
+            return env_val.strip()
+        return str(getattr(self, env_key, "")).strip()
 
 
 settings = Settings()
 
-for _directory in (FIXTURES_DIR, STATIC_DIR, RENDERS_DIR, AUDIO_DIR):
+
+def validate_production_config() -> None:
+    """Fail closed when APP_ENV=production and required security/service settings are missing."""
+    if not settings.is_production:
+        return
+
+    errors: list[str] = []
+
+    if settings.is_mock_veo:
+        errors.append("MOCK_VERTEX_VEO must be false in production.")
+    if settings.is_mock_tts:
+        errors.append("MOCK_TTS must be false in production.")
+    if settings.effective_enable_dev_topup:
+        errors.append("ENABLE_DEV_TOPUP must be false in production.")
+
+    db_url = settings.effective_database_url
+    if not db_url or db_url.startswith("sqlite:"):
+        errors.append("DATABASE_URL must point to PostgreSQL in production (SQLite is forbidden).")
+
+    if len(settings.effective_worker_api_key) < 24:
+        errors.append("WORKER_API_KEY must be set (>= 24 chars) in production.")
+
+    if len(settings.effective_auth_jwt_secret) < 32:
+        errors.append("AUTH_JWT_SECRET must be explicitly set (>= 32 chars) in production.")
+
+    if len(settings.effective_signed_url_secret) < 32:
+        errors.append(
+            "SIGNED_URL_SECRET or AUTH_JWT_SECRET (>= 32 chars) is required in production."
+        )
+
+    cors = settings.effective_cors_origins
+    if not cors:
+        errors.append("CORS_ORIGINS must specify explicit allowed origins in production.")
+    elif "*" in cors and not _env_bool("ALLOW_WILDCARD_CORS", settings.ALLOW_WILDCARD_CORS):
+        errors.append("CORS_ORIGINS cannot contain '*' in production.")
+
+    if not settings.effective_gcp_project_id:
+        errors.append("GCP_PROJECT_ID is required in production.")
+    if not settings.effective_gcs_bucket:
+        errors.append("GCS_BUCKET is required in production.")
+    if not (
+        settings.effective_google_api_key
+        or settings.effective_vertex_access_token
+        or settings.effective_google_application_credentials
+    ):
+        errors.append(
+            "One Google Cloud credential (GOOGLE_API_KEY, VERTEX_ACCESS_TOKEN, "
+            "or GOOGLE_APPLICATION_CREDENTIALS) is required in production."
+        )
+
+    if not settings.effective_stripe_secret_key:
+        errors.append("STRIPE_SECRET_KEY is required in production.")
+    if not settings.effective_stripe_webhook_secret:
+        errors.append("STRIPE_WEBHOOK_SECRET is required in production.")
+
+    if errors:
+        raise RuntimeError(
+            "Invalid production configuration; startup aborted:\n- " + "\n- ".join(errors)
+        )
+
+
+for _directory in (FIXTURES_DIR, STATIC_DIR, AUDIO_DIR, STORAGE_DIR):
     _directory.mkdir(parents=True, exist_ok=True)

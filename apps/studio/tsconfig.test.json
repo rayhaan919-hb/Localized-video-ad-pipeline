@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "jsx": "react",
+    "incremental": false,
+    "noEmit": false,
+    "outDir": ".test-dist",
+    "rootDir": "../..",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@video-ad/remotion": ["../../packages/remotion/src/index.ts"]
+    }
+  },
+  "include": [
+    "src/__tests__/**/*.ts",
+    "src/lib/serverStore.ts",
+    "src/lib/supabase.ts",
+    "src/lib/adPresetsServer.ts",
+    "src/types/studio.ts"
+  ]
+}
