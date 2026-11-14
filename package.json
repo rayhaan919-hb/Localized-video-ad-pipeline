@@ -1,0 +1,16 @@
+{
+  "name": "localized-video-ad-pipeline",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Localized AI Video Ad Pipeline (Non-English D2C) Monorepo",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "verify:worker": "cd services/worker && ruff check . && pytest",
+    "verify:remotion": "cd packages/remotion && npm run typecheck && npm run lint",
+    "verify:studio": "cd apps/studio && npm run typecheck && npm run lint && npm run build",
+    "verify:all": "npm run verify:worker && npm run verify:remotion && npm run verify:studio"
+  }
+}

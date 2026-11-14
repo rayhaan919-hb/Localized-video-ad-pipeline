@@ -1,0 +1,21 @@
+openapi: 3.1.0
+info:
+  title: Localized AI Video Ad API
+  version: 1.0.0
+paths:
+  /v1/videos/generate:
+    post:
+      summary: Deduct 1 credit atomically and start Veo 3.1 + Remotion render job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [workspace_id, product_url, target_language]
+              properties:
+                workspace_id: { type: string, format: uuid }
+                product_url: { type: string, format: uri }
+                target_language: { type: string, enum: [ur, ar, hi, en] }
+      responses:
+        '202': { description: Render job accepted }
