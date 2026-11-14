@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -113,44 +114,136 @@ def _humanize_slug(url: str) -> tuple[str, str]:
     return f"{brand} Signature D2C Edition", brand
 
 
+def _extract_json_ld_product(soup: BeautifulSoup) -> dict[str, Any]:
+    """Extract schema.org Product attributes from embedded JSON-LD blocks."""
+
+    def _find_product(node: Any) -> dict[str, Any] | None:
+        if isinstance(node, list):
+            for item in node:
+                found = _find_product(item)
+                if found:
+                    return found
+        elif isinstance(node, dict):
+            node_type = node.get("@type")
+            types = node_type if isinstance(node_type, list) else [node_type]
+            if any(str(t).lower() == "product" for t in types if t):
+                return node
+            if "@graph" in node:
+                return _find_product(node["@graph"])
+        return None
+
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw_text = script.string or script.get_text()
+        if not raw_text:
+            continue
+        try:
+            parsed = json.loads(raw_text)
+        except Exception:
+            continue
+        product = _find_product(parsed)
+        if not product:
+            continue
+
+        result: dict[str, Any] = {}
+        if product.get("name"):
+            result["name"] = str(product["name"]).strip()
+        brand_obj = product.get("brand")
+        if isinstance(brand_obj, dict) and brand_obj.get("name"):
+            result["brand"] = str(brand_obj["name"]).strip()
+        elif isinstance(brand_obj, str) and brand_obj.strip():
+            result["brand"] = brand_obj.strip()
+        if product.get("description"):
+            result["description"] = str(product["description"]).strip()
+
+        image_val = product.get("image")
+        if isinstance(image_val, list) and image_val:
+            first_img = image_val[0]
+            if isinstance(first_img, dict):
+                image_val = first_img.get("url") or first_img.get("contentUrl")
+            else:
+                image_val = first_img
+        elif isinstance(image_val, dict):
+            image_val = image_val.get("url") or image_val.get("contentUrl")
+        if isinstance(image_val, str) and image_val.strip():
+            result["image"] = image_val.strip()
+
+        offers = product.get("offers")
+        offer = offers[0] if isinstance(offers, list) and offers else offers
+        if isinstance(offer, dict):
+            if offer.get("priceCurrency"):
+                result["currency"] = str(offer["priceCurrency"]).strip()
+            if offer.get("price") is not None:
+                result["price_amount"] = str(offer["price"]).strip()
+        return result
+
+    return {}
+
+
 def parse_product_html(
     html: str,
     product_url: str,
     target_language: str = "ur",
 ) -> dict[str, Any]:
-    """Parse OpenGraph / standard HTML tags into normalized product metadata."""
+    """Parse OpenGraph, JSON-LD Product schema, and HTML tags into normalized metadata."""
     soup = BeautifulSoup(html, "html.parser")
     fallback = _fallback_metadata(product_url, target_language)
+    json_ld = _extract_json_ld_product(soup)
 
     og_title = soup.find("meta", property="og:title")
     title_tag = soup.find("title")
     title = (
         (og_title.get("content") if og_title else None)
+        or json_ld.get("name")
         or (title_tag.get_text(strip=True) if title_tag else None)
         or fallback["title"]
     )
 
     og_site = soup.find("meta", property="og:site_name")
-    brand = (og_site.get("content") if og_site else None) or fallback["brand"]
+    brand = (
+        (og_site.get("content") if og_site else None)
+        or json_ld.get("brand")
+        or fallback["brand"]
+    )
 
     og_price = soup.find("meta", property="product:price:amount")
     og_currency = soup.find("meta", property="product:price:currency")
-    currency = (og_currency.get("content") if og_currency else None) or fallback["currency"]
-    price = (
-        f"{currency} {og_price.get('content')}"
-        if og_price and og_price.get("content")
-        else fallback["price"]
+    currency = (
+        (og_currency.get("content") if og_currency else None)
+        or json_ld.get("currency")
+        or fallback["currency"]
     )
+    raw_amount = (og_price.get("content") if og_price else None) or json_ld.get("price_amount")
+    price = f"{currency} {raw_amount}" if raw_amount else fallback["price"]
 
     og_image = soup.find("meta", property="og:image")
-    image_url = (og_image.get("content") if og_image else None) or fallback["image_url"]
+    image_url = (
+        (og_image.get("content") if og_image else None)
+        or json_ld.get("image")
+        or fallback["image_url"]
+    )
+
+    og_desc = soup.find("meta", property="og:description")
+    meta_desc = soup.find("meta", attrs={"name": "description"})
+    description = (
+        (og_desc.get("content") if og_desc else None)
+        or (meta_desc.get("content") if meta_desc else None)
+        or json_ld.get("description")
+        or ""
+    )
+    description = re.sub(r"\s+", " ", str(description)).strip()[:220]
 
     bullets = [
         li.get_text(strip=True)
         for li in soup.select("ul li")
         if 8 <= len(li.get_text(strip=True)) <= 120
     ][:3]
-    features = bullets if bullets else fallback["features"]
+    if bullets:
+        features = bullets
+    elif description:
+        sentences = [s.strip() for s in re.split(r"[.!?]+", description) if len(s.strip()) >= 8]
+        features = sentences[:3] if sentences else fallback["features"]
+    else:
+        features = fallback["features"]
 
     return {
         "product_url": product_url,
@@ -160,6 +253,7 @@ def parse_product_html(
         "currency": str(currency).strip(),
         "price": str(price).strip(),
         "features": features,
+        "description": description,
         "image_url": str(image_url).strip(),
         "target_language": target_language,
     }
@@ -210,17 +304,36 @@ def _fallback_metadata(product_url: str, target_language: str = "ur") -> dict[st
     }
 
 
+def _should_skip_live_fetch(product_url: str) -> bool:
+    """Skip external HTTP calls for local/example/test hosts to keep tests offline-safe."""
+    parsed = urlparse(product_url)
+    host = (parsed.hostname or "").lower()
+    if "simulate-fail" in product_url.lower():
+        return True
+    if host in {"localhost", "127.0.0.1", "example.com", "example.org", "example.net"}:
+        return True
+    return host.endswith((".local", ".test", ".example", ".invalid"))
+
+
 def scrape_product_url(
     product_url: str,
     target_language: str = "ur",
-    fetch_live: bool = False,
+    fetch_live: bool = True,
 ) -> dict[str, Any]:
-    """Scrape or deterministically synthesize localized D2C product metadata."""
-    if fetch_live:
+    """Scrape live e-commerce metadata when reachable, falling back to deterministic tokens."""
+    if fetch_live and not _should_skip_live_fetch(product_url):
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
         try:
-            with httpx.Client(timeout=2.5, follow_redirects=True) as client:
+            with httpx.Client(timeout=5.0, follow_redirects=True, headers=headers) as client:
                 response = client.get(product_url)
-                if response.status_code == 200 and "<html" in response.text.lower():
+                body_lower = response.text.lower()
+                if response.status_code == 200 and ("<html" in body_lower or "<meta" in body_lower):
                     return parse_product_html(response.text, product_url, target_language)
         except httpx.HTTPError:
             pass

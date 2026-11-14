@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import type {
   AdAngle,
   CaptionSegment,
@@ -36,9 +37,15 @@ export async function fetchFromWorker(
 ): Promise<Response | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const apiKey = process.env.WORKER_API_KEY?.trim();
+  const mergedHeaders = new Headers(init?.headers);
+  if (apiKey && !mergedHeaders.has('X-API-Key') && !mergedHeaders.has('Authorization')) {
+    mergedHeaders.set('X-API-Key', apiKey);
+  }
   try {
     const response = await fetch(`${getWorkerBaseUrl()}${endpointPath}`, {
       ...init,
+      headers: mergedHeaders,
       signal: controller.signal,
       cache: 'no-store',
     });
@@ -681,6 +688,48 @@ export function getRenderMp4Buffer(jobId: string): Buffer {
     } catch {
       // Fallback to synthesized MP4 container below
     }
+  }
+
+  const fixturePath = candidatePaths[1];
+  try {
+    fs.mkdirSync(path.dirname(fixturePath), { recursive: true });
+    execFileSync(
+      'ffmpeg',
+      [
+        '-y',
+        '-f',
+        'lavfi',
+        '-i',
+        'color=c=0x09090B:size=540x960:rate=30',
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=220:sample_rate=24000',
+        '-t',
+        '2',
+        '-vf',
+        'drawbox=x=24:y=160:w=492:h=620:color=0x18181B@0.92:t=fill',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '96k',
+        '-movflags',
+        '+faststart',
+        fixturePath,
+      ],
+      { stdio: 'ignore', timeout: 8000 }
+    );
+    if (fs.existsSync(fixturePath) && fs.statSync(fixturePath).size > 1024) {
+      return fs.readFileSync(fixturePath);
+    }
+  } catch {
+    // Fall back to deterministic MP4 atom header if ffmpeg binary is unavailable
   }
 
   // Synthesize a valid ISO Base Media (MP4) binary header + metadata payload

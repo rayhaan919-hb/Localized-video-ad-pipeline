@@ -18,6 +18,7 @@ interface GenerateRequestBody {
   target_language?: string;
   ad_angle?: string;
   simulate_failure?: boolean;
+  duration_seconds?: number;
   custom_props?: {
     productTitle?: string;
     brandName?: string;
@@ -70,18 +71,33 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   const adAngle: AdAngle = isAdAngle(rawAngle) ? rawAngle : 'problem_solution';
 
+  const customProps =
+    body.custom_props && typeof body.custom_props === 'object'
+      ? (body.custom_props as Record<string, unknown>)
+      : undefined;
+  const durationSeconds =
+    typeof body.duration_seconds === 'number' && Number.isFinite(body.duration_seconds)
+      ? Math.max(2, Math.min(15, body.duration_seconds))
+      : 2;
+
   // First try proxying to the FastAPI worker if reachable
-  const workerRes = await fetchFromWorker('/v1/videos/generate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      workspace_id: workspaceId,
-      product_url: productUrl,
-      target_language: rawLang,
-      ad_angle: adAngle,
-      simulate_failure: Boolean(body.simulate_failure),
-    }),
-  });
+  const workerRes = await fetchFromWorker(
+    '/v1/videos/generate',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workspace_id: workspaceId,
+        product_url: productUrl,
+        target_language: rawLang,
+        ad_angle: adAngle,
+        simulate_failure: Boolean(body.simulate_failure),
+        duration_seconds: durationSeconds,
+        ...(customProps ? { custom_props: customProps } : {}),
+      }),
+    },
+    15000
+  );
 
   if (workerRes) {
     const workerData = (await workerRes.json()) as VideoJobRecord & {

@@ -2,26 +2,37 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from celery import Celery
 
 import app.db as db_module
 from app.compositor import composite_final_video
+from app.config import is_redis_reachable, settings
 from app.db import VideoJob, normalize_uuid, refund_credit_atomically
 from app.scraper import scrape_product_url
 from app.tts import generate_localized_script, synthesize_voiceover_wav
 from app.veo import VeoClient
 
+_redis_up = is_redis_reachable(settings.REDIS_URL)
+_force_eager = os.environ.get("CELERY_ALWAYS_EAGER", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+_use_redis_broker = _redis_up and not _force_eager
+
 celery_app = Celery(
     "localized_video_ad_worker",
-    broker="memory://",
-    backend="cache+memory://",
+    broker=settings.REDIS_URL if _use_redis_broker else "memory://",
+    backend=settings.REDIS_URL if _use_redis_broker else "cache+memory://",
 )
 celery_app.conf.update(
-    task_always_eager=True,
+    task_always_eager=not _use_redis_broker,
     task_eager_propagates=False,
-    task_ignore_result=True,
+    task_ignore_result=not _use_redis_broker,
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
@@ -33,6 +44,8 @@ def process_video_job(
     job_id: str,
     ad_angle: str = "problem_solution",
     simulate_failure: bool = False,
+    custom_props: dict[str, Any] | None = None,
+    duration_seconds: float = 2.0,
 ) -> dict[str, Any]:
     """Execute the end-to-end localized video ad pipeline for a VideoJob.
 
@@ -54,13 +67,16 @@ def process_video_job(
         target_language = job.target_language
 
         try:
-            # Step 1: Scrape product & generate localized RTL/LTR script + TTS voiceover
+            # Step 1: Scrape product & generate localized RTL/LTR script
             metadata = scrape_product_url(product_url, target_language=target_language)
             script_data = generate_localized_script(
                 metadata,
                 target_language=target_language,
                 ad_angle=ad_angle,
+                custom_props=custom_props,
+                duration_seconds=duration_seconds,
             )
+            effective_duration = float(script_data.get("duration_ms", 2000)) / 1000.0
 
             job.status = "GENERATING_CLIPS"
             status_history.append("GENERATING_CLIPS")
@@ -72,12 +88,17 @@ def process_video_job(
                 raise RuntimeError("Simulated Vertex AI Veo / pipeline failure")
 
             # Step 2: Generate voiceover WAV and Veo 3.1 9:16 video clip
-            wav_path = synthesize_voiceover_wav(normalized_job_id, script_data)
+            wav_path = synthesize_voiceover_wav(
+                normalized_job_id,
+                script_data,
+                duration_seconds=effective_duration,
+            )
             veo_client = VeoClient()
             veo_result = veo_client.generate_clip(
                 job_id=normalized_job_id,
                 prompt=script_data["veo_prompt"],
                 target_language=target_language,
+                duration_seconds=effective_duration,
             )
 
             job.veo_gcs_uri = veo_result.gcs_uri
@@ -89,7 +110,7 @@ def process_video_job(
             job.script_json = dict(script_data)
             session.commit()
 
-            # Step 3: Composite final 9:16 MP4 with audio and localized metadata
+            # Step 3: Composite final 9:16 MP4 with burned-in captions & audio
             final_mp4_path = composite_final_video(
                 job_id=normalized_job_id,
                 source_video_path=veo_result.local_clip_path,

@@ -14,6 +14,7 @@ from app.config import DEFAULT_OWNER_ID, RENDERS_DIR
 from app.db import Workspace, configure_database
 from app.main import app
 from app.scraper import parse_product_html
+from app.tasks import celery_app
 from app.veo import SAMPLE_FIXTURE_PATH, ensure_sample_fixture
 
 
@@ -24,6 +25,9 @@ def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[No
     db_url = f"sqlite:///{db_file.as_posix()}"
     monkeypatch.setenv("DATABASE_URL", db_url)
     monkeypatch.setenv("MOCK_VERTEX_VEO", "true")
+    monkeypatch.setenv("CELERY_ALWAYS_EAGER", "true")
+    monkeypatch.delenv("WORKER_API_KEY", raising=False)
+    monkeypatch.setitem(celery_app.conf, "task_always_eager", True)
     configure_database(db_url)
     yield
 
@@ -264,3 +268,124 @@ def test_invalid_language_rejected_with_422(client: TestClient) -> None:
         },
     )
     assert resp.status_code == 422
+
+
+def test_custom_props_and_real_composited_mp4(client: TestClient) -> None:
+    """Verify custom_props override script_json and compositor produces a valid MP4."""
+    ws_id = str(uuid.uuid4())
+    custom_props = {
+        "productTitle": "Custom Studio Elixir",
+        "brandName": "Atelier Noor",
+        "priceDisplay": "PKR 6,200",
+        "originalPriceDisplay": "PKR 8,000",
+        "discountBadge": "22% OFF",
+        "hookText": "ہوم اسٹوڈیو سے براہِ راست کسٹم ویڈیو ایڈ!",
+        "ctaText": "ابھی آرڈر کریں",
+        "captions": [
+            {
+                "id": "custom-1",
+                "text": "پہلا کسٹم کیپشن",
+                "highlightWord": "کسٹم",
+            },
+            {
+                "id": "custom-2",
+                "text": "دوسرا کسٹم کیپشن",
+                "highlightWord": "دوسرا",
+            },
+        ],
+    }
+
+    resp = client.post(
+        "/v1/videos/generate",
+        json={
+            "workspace_id": ws_id,
+            "product_url": "https://example.com/products/elixir",
+            "target_language": "ur",
+            "ad_angle": "flash_sale",
+            "duration_seconds": 3.0,
+            "custom_props": custom_props,
+        },
+    )
+    assert resp.status_code == 202
+    data = resp.json()
+    assert data["status"] == "COMPLETED"
+    script = data["script_json"]
+    assert script["product_title"] == "Custom Studio Elixir"
+    assert script["brand"] == "Atelier Noor"
+    assert script["price_badge"] == "PKR 6,200"
+    assert script["discount_badge"] == "22% OFF"
+    assert script["hook"] == custom_props["hookText"]
+    assert script["cta_text"] == custom_props["ctaText"]
+    assert script["ad_angle"] == "flash_sale"
+    assert script["duration_ms"] == 3000
+    assert len(script["captions"]) == 2
+    assert script["captions"][0]["start_ms"] == 0
+    assert script["captions"][1]["end_ms"] == 3000
+
+    mp4_resp = client.get(data["final_mp4_url"])
+    assert mp4_resp.status_code == 200
+    mp4_bytes = mp4_resp.content
+    assert len(mp4_bytes) > 5000
+    assert b"ftyp" in mp4_bytes[:32]
+    assert b"moov" in mp4_bytes
+    assert b"mdat" in mp4_bytes
+
+
+def test_json_ld_and_meta_description_scraping() -> None:
+    """Verify parse_product_html extracts schema.org JSON-LD Product fields & meta description."""
+    html = """
+    <html>
+      <head>
+        <meta name="description" content="Cold-pressed black seed serum. Absorbs in seconds." />
+        <script type="application/ld+json">
+        {
+          "@context": "https://schema.org",
+          "@type": "Product",
+          "name": "Kalonji Radiance Oil",
+          "brand": {"@type": "Brand", "name": "Hamdard Botanics"},
+          "offers": {"@type": "Offer", "priceCurrency": "PKR", "price": "3450"}
+        }
+        </script>
+      </head>
+      <body><h1>Kalonji Radiance Oil</h1></body>
+    </html>
+    """
+    parsed = parse_product_html(html, "https://example.com/products/kalonji", "ur")
+    assert parsed["title"] == "Kalonji Radiance Oil"
+    assert parsed["brand"] == "Hamdard Botanics"
+    assert parsed["currency"] == "PKR"
+    assert parsed["price"] == "PKR 3450"
+    assert "Cold-pressed" in parsed["description"]
+    assert len(parsed["features"]) >= 1
+
+
+def test_worker_api_key_guard(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify WORKER_API_KEY enforces auth on /v1 routes while keeping /health open."""
+    monkeypatch.setenv("WORKER_API_KEY", "test-secret-token-123")
+
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.json()["auth_required"] is True
+
+    unauth = client.post(
+        "/v1/products/scrape",
+        json={"product_url": "https://example.com/products/serum", "target_language": "ur"},
+    )
+    assert unauth.status_code == 401
+
+    wrong_key = client.post(
+        "/v1/products/scrape",
+        headers={"X-API-Key": "wrong-token"},
+        json={"product_url": "https://example.com/products/serum", "target_language": "ur"},
+    )
+    assert wrong_key.status_code == 401
+
+    ok_bearer = client.post(
+        "/v1/products/scrape",
+        headers={"Authorization": "Bearer test-secret-token-123"},
+        json={"product_url": "https://example.com/products/serum", "target_language": "ur"},
+    )
+    assert ok_bearer.status_code == 200

@@ -46,6 +46,25 @@ def resolve_database_url(raw_url: str | None) -> str:
     return raw_url
 
 
+def is_redis_reachable(redis_url: str, timeout: float = 0.25) -> bool:
+    """Return True if the configured Redis host/port accepts TCP connections."""
+    import socket
+    from urllib.parse import urlparse
+
+    if not redis_url or redis_url.startswith("memory://"):
+        return False
+    parsed = urlparse(redis_url)
+    host = parsed.hostname
+    if not host:
+        return False
+    port = parsed.port or 6379
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables or .env."""
 
@@ -61,6 +80,15 @@ class Settings(BaseSettings):
     VEO_MODEL: str = "veo-3.1-generate-001"
     MOCK_VERTEX_VEO: bool = True
     REDIS_URL: str = "redis://localhost:6379/0"
+    WORKER_API_KEY: str = ""
+    CORS_ORIGINS: str = "*"
+    GOOGLE_API_KEY: str = ""
+    VERTEX_ACCESS_TOKEN: str = ""
+    GOOGLE_APPLICATION_CREDENTIALS: str = ""
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+    USE_REMOTION_CLI: bool = False
+    DEFAULT_DURATION_SECONDS: float = 2.0
 
     @property
     def effective_database_url(self) -> str:
@@ -74,6 +102,41 @@ class Settings(BaseSettings):
         if env_val is not None:
             return env_val.strip().lower() in ("1", "true", "yes", "on")
         return bool(self.MOCK_VERTEX_VEO)
+
+    @property
+    def effective_worker_api_key(self) -> str:
+        env_val = os.environ.get("WORKER_API_KEY")
+        return (env_val if env_val is not None else self.WORKER_API_KEY).strip()
+
+    @property
+    def effective_cors_origins(self) -> list[str]:
+        env_val = os.environ.get("CORS_ORIGINS")
+        raw = (env_val if env_val is not None else self.CORS_ORIGINS).strip()
+        if not raw or raw == "*":
+            return ["*"]
+        return [item.strip() for item in raw.split(",") if item.strip()]
+
+    @property
+    def effective_google_api_key(self) -> str:
+        env_val = os.environ.get("GOOGLE_API_KEY")
+        return (env_val if env_val is not None else self.GOOGLE_API_KEY).strip()
+
+    @property
+    def effective_vertex_access_token(self) -> str:
+        env_val = os.environ.get("VERTEX_ACCESS_TOKEN")
+        return (env_val if env_val is not None else self.VERTEX_ACCESS_TOKEN).strip()
+
+    @property
+    def effective_stripe_secret_key(self) -> str:
+        env_val = os.environ.get("STRIPE_SECRET_KEY")
+        return (env_val if env_val is not None else self.STRIPE_SECRET_KEY).strip()
+
+    @property
+    def use_remotion_cli(self) -> bool:
+        env_val = os.environ.get("USE_REMOTION_CLI")
+        if env_val is not None:
+            return env_val.strip().lower() in ("1", "true", "yes", "on")
+        return bool(self.USE_REMOTION_CLI)
 
 
 settings = Settings()
