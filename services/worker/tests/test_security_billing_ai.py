@@ -22,7 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.db as db_module
-from app.config import validate_production_config
+from app.config import settings, validate_production_config
 from app.db import (
     InsufficientCreditsError,
     VideoJob,
@@ -32,6 +32,7 @@ from app.db import (
 )
 from app.main import app
 from app.security import rate_limiter
+from app.storage import StorageError, register_workspace_file
 from app.tasks import celery_app, recover_interrupted_jobs
 from app.tts import TTSProviderError, synthesize_voiceover_wav
 from app.veo import VeoClient, VeoProviderError, VeoValidationError, ensure_sample_fixture
@@ -50,6 +51,8 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[N
     monkeypatch.setenv("MOCK_TTS", "true")
     monkeypatch.setenv("INITIAL_PROMO_CREDITS", "3")
     monkeypatch.setenv("CELERY_ALWAYS_EAGER", "true")
+    monkeypatch.setenv("TRUST_PROXY_HEADERS", "false")
+    monkeypatch.delenv("WORKER_API_KEY", raising=False)
     monkeypatch.setitem(celery_app.conf, "task_always_eager", True)
     rate_limiter.reset()
     configure_database(db_url)
@@ -775,3 +778,218 @@ def test_v1_sqlite_database_non_destructive_upgrade(tmp_path: Path) -> None:
         assert migrated_job is not None
         assert migrated_job.product_url == "https://legacy.store/p"
         assert migrated_job.progress_pct == 0
+
+
+def test_worker_api_key_enforcement_and_xff_spoof_protection(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify WORKER_API_KEY gates /v1/* routes and XFF cannot spoof rate limits."""
+    monkeypatch.setenv("WORKER_API_KEY", "internal-shared-secret-key-24")
+
+    # /health stays accessible without X-Worker-API-Key
+    assert client.get("/health").status_code == 200
+
+    # Protected /v1/* routes reject missing/wrong X-Worker-API-Key cleanly with 401
+    assert client.get("/v1/auth/me").status_code == 401
+    assert client.get("/v1/videos", headers={"X-Worker-API-Key": "wrong-key"}).status_code == 401
+
+    # Stripe webhook is authenticated by Stripe-Signature HMAC rather than X-Worker-API-Key
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_secret_value_12345")
+    hook_resp = client.post(
+        "/v1/billing/webhooks/stripe",
+        content=b"{}",
+        headers={"Stripe-Signature": "t=123,v1=bad"},
+    )
+    assert hook_resp.status_code == 400
+
+    # Valid key allows API access and rate-limit ignores spoofed XFF when untrusted
+    worker_headers = {"X-Worker-API-Key": "internal-shared-secret-key-24"}
+    reg = client.post(
+        "/v1/auth/register",
+        headers=worker_headers,
+        json={"email": "xff@example.com", "password": "PassWord99!", "full_name": "XFF Test"},
+    )
+    assert reg.status_code == 201
+
+    monkeypatch.setattr(settings, "RATE_LIMIT_AUTH_PER_MINUTE", 3)
+    rate_limiter.reset()
+    for idx in range(3):
+        attempt = client.post(
+            "/v1/auth/login",
+            headers={**worker_headers, "X-Forwarded-For": f"203.0.113.{idx + 1}"},
+            json={"email": f"other-{idx}@example.com", "password": "WrongPassword!"},
+        )
+        assert attempt.status_code == 401
+
+    throttled = client.post(
+        "/v1/auth/login",
+        headers={**worker_headers, "X-Forwarded-For": "203.0.113.99"},
+        json={"email": "other-99@example.com", "password": "WrongPassword!"},
+    )
+    assert throttled.status_code == 429
+
+
+def test_async_payment_succeeded_and_multiple_partial_refunds(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify async_payment_succeeded credit grant and idempotent cumulative partial refunds."""
+    reg = _register(client, "partial-refund@example.com")
+    headers = {"Authorization": f"Bearer {reg['access_token']}"}
+    ws_id = reg["primary_workspace_id"]
+
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_mock_server_key")
+    monkeypatch.setenv("STRIPE_PRICE_STARTER_10", "price_starter_10_live")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_secret_value_12345")
+
+    async_paid = {
+        "id": "evt_async_paid_001",
+        "type": "checkout.session.async_payment_succeeded",
+        "data": {
+            "object": {
+                "id": "cs_async_123",
+                "payment_intent": "pi_async_001",
+                "payment_status": "paid",
+                "amount_total": 900,
+                "currency": "usd",
+                "client_reference_id": ws_id,
+                "metadata": {
+                    "workspace_id": ws_id,
+                    "user_id": reg["user"]["id"],
+                    "pack_id": "starter_10",
+                },
+            }
+        },
+    }
+    raw_async = json.dumps(async_paid).encode("utf-8")
+    sig_async = _sign_stripe_payload(raw_async, "whsec_test_secret_value_12345")
+    resp_async = client.post(
+        "/v1/billing/webhooks/stripe", content=raw_async, headers={"Stripe-Signature": sig_async}
+    )
+    assert resp_async.status_code == 200
+    assert resp_async.json()["credit_balance"] == 13  # 3 promo + 10 pack
+
+    # Cumulative partial refund #1: 450/900 cents -> revoke 5 credits (13 -> 8)
+    ref1 = {
+        "id": "evt_ref_partial_1",
+        "type": "charge.refunded",
+        "data": {
+            "object": {
+                "payment_intent": "pi_async_001",
+                "amount": 900,
+                "amount_refunded": 450,
+            }
+        },
+    }
+    raw_ref1 = json.dumps(ref1).encode("utf-8")
+    sig_ref1 = _sign_stripe_payload(raw_ref1, "whsec_test_secret_value_12345")
+    r1 = client.post(
+        "/v1/billing/webhooks/stripe",
+        content=raw_ref1,
+        headers={"Stripe-Signature": sig_ref1},
+    )
+    assert r1.status_code == 200
+    assert r1.json()["credits_revoked"] == 5
+    assert r1.json()["credit_balance"] == 8
+
+    # Cumulative partial refund #2: 900/900 cents -> revoke remaining 5 credits ONLY (8 -> 3)
+    ref2 = {
+        "id": "evt_ref_partial_2",
+        "type": "charge.refunded",
+        "data": {
+            "object": {
+                "payment_intent": "pi_async_001",
+                "amount": 900,
+                "amount_refunded": 900,
+            }
+        },
+    }
+    raw_ref2 = json.dumps(ref2).encode("utf-8")
+    sig_ref2 = _sign_stripe_payload(raw_ref2, "whsec_test_secret_value_12345")
+    r2 = client.post(
+        "/v1/billing/webhooks/stripe",
+        content=raw_ref2,
+        headers={"Stripe-Signature": sig_ref2},
+    )
+    assert r2.status_code == 200
+    assert r2.json()["credits_revoked"] == 5
+    assert r2.json()["credit_balance"] == 3
+    assert client.get(f"/v1/workspaces/{ws_id}", headers=headers).json()["credit_balance"] == 3
+
+
+def test_production_guards_video_limit_ssrf_and_stale_recovery(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify /health probes, generate_video SSRF rejection, video size cap, and stale recovery."""
+    health = client.get("/health")
+    assert health.status_code == 200
+    hjson = health.json()
+    assert hjson["database"] == "ok"
+    assert hjson["ffmpeg_available"] is True
+
+    reg = _register(client, "guards@example.com")
+    headers = {"Authorization": f"Bearer {reg['access_token']}"}
+    ws_id = reg["primary_workspace_id"]
+    uid = reg["user"]["id"]
+
+    # Upfront SSRF check in /v1/videos/generate before charging credit
+    ssrf_gen = client.post(
+        "/v1/videos/generate",
+        headers=headers,
+        json={
+            "workspace_id": ws_id,
+            "product_url": "http://127.0.0.1/internal",
+            "target_language": "en",
+        },
+    )
+    assert ssrf_gen.status_code == 400
+    assert client.get(f"/v1/workspaces/{ws_id}", headers=headers).json()["credit_balance"] == 3
+
+    # rendered_video honors MAX_RENDERED_VIDEO_BYTES separately from MAX_ASSET_UPLOAD_BYTES
+    monkeypatch.setenv("MAX_RENDERED_VIDEO_BYTES", "2048")
+    monkeypatch.setattr(settings, "MAX_ASSET_UPLOAD_BYTES", 512)
+    with db_module.SessionLocal() as session:
+        ok_asset = register_workspace_file(
+            session,
+            workspace_id=ws_id,
+            user_id=uid,
+            asset_kind="rendered_video",
+            filename="ok.mp4",
+            content_type="video/mp4",
+            data=b"x" * 1500,
+        )
+        assert ok_asset.size_bytes == 1500
+        with pytest.raises(StorageError):
+            register_workspace_file(
+                session,
+                workspace_id=ws_id,
+                user_id=uid,
+                asset_kind="rendered_video",
+                filename="too-big.mp4",
+                content_type="video/mp4",
+                data=b"x" * 2500,
+            )
+
+        # Freshly created PROCESSING job must NOT be killed by stale recovery
+        fresh_jid = str(uuid.uuid4())
+        session.add(
+            VideoJob(
+                id=fresh_jid,
+                workspace_id=ws_id,
+                user_id=uid,
+                product_url="https://example.com/fresh",
+                target_language="ur",
+                status="PROCESSING",
+                reserved_credits=1,
+            )
+        )
+        session.flush()
+        reserve_credit_atomically(
+            session, workspace_id=ws_id, job_id=fresh_jid, user_id=uid, cost=1
+        )
+        session.commit()
+
+    assert recover_interrupted_jobs(min_age_seconds=900) == 0
+    assert recover_interrupted_jobs(min_age_seconds=0) == 1

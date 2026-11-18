@@ -325,22 +325,42 @@ def parse_product_html(
 
 
 def _fetch_with_ssrf_redirects(
-    url: str, *, headers: dict[str, str], allow_private_in_test: bool = False
-) -> httpx.Response:
-    """Perform an HTTP GET resolving redirects manually so every hop is SSRF-validated."""
+    url: str,
+    *,
+    headers: dict[str, str],
+    allow_private_in_test: bool = False,
+    max_bytes: int = 2 * 1024 * 1024,
+) -> tuple[int, str, bytes, dict[str, str]]:
+    """Perform a streaming HTTP GET resolving redirects and enforcing max_bytes."""
     current_url = validate_public_http_url(url, allow_private_in_test=allow_private_in_test)
     max_hops = 5
     with httpx.Client(timeout=8.0, follow_redirects=False, headers=headers) as client:
         for _ in range(max_hops + 1):
-            resp = client.get(current_url)
-            if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("location"):
-                next_url = urljoin(current_url, resp.headers["location"].strip())
-                current_url = validate_public_http_url(
-                    next_url,
-                    allow_private_in_test=allow_private_in_test,
-                )
-                continue
-            return resp
+            with client.stream("GET", current_url) as resp:
+                if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("location"):
+                    next_url = urljoin(current_url, resp.headers["location"].strip())
+                    current_url = validate_public_http_url(
+                        next_url,
+                        allow_private_in_test=allow_private_in_test,
+                    )
+                    continue
+
+                cl_header = resp.headers.get("content-length")
+                if cl_header:
+                    try:
+                        if int(cl_header) > max_bytes:
+                            raise ScraperError("Remote response exceeded maximum allowed size.")
+                    except ValueError:
+                        pass
+
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in resp.iter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ScraperError("Remote response exceeded maximum allowed size.")
+                    chunks.append(chunk)
+                return resp.status_code, str(resp.url), b"".join(chunks), dict(resp.headers)
     raise ScraperError("Exceeded maximum redirect hops while fetching product URL.")
 
 
@@ -387,16 +407,17 @@ def scrape_product_url(
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     try:
-        response = _fetch_with_ssrf_redirects(
+        status_code, final_url, body_bytes, _headers = _fetch_with_ssrf_redirects(
             product_url,
             headers=headers,
             allow_private_in_test=allow_private_in_test,
         )
-        body_lower = response.text.lower()
-        if response.status_code == 200 and ("<html" in body_lower or "<meta" in body_lower):
-            return parse_product_html(response.text, str(response.url), lang)
+        body_text = body_bytes.decode("utf-8", errors="replace")
+        body_lower = body_text.lower()
+        if status_code == 200 and ("<html" in body_lower or "<meta" in body_lower):
+            return parse_product_html(body_text, final_url, lang)
         unreached["error"] = (
-            f"Target site returned HTTP {response.status_code} "
+            f"Target site returned HTTP {status_code} "
             "without readable HTML product metadata."
         )
     except UnsafeUrlError:
@@ -432,13 +453,13 @@ def download_and_validate_product_image(
 ) -> tuple[bytes, str, str]:
     """SSRF-safely download and magic-byte-validate a remote product image."""
     headers = {"Accept": "image/jpeg,image/png,image/webp,*/*;q=0.5"}
-    resp = _fetch_with_ssrf_redirects(
+    status_code, _final_url, data, _headers = _fetch_with_ssrf_redirects(
         image_url,
         headers=headers,
         allow_private_in_test=allow_private_in_test,
+        max_bytes=int(settings.MAX_ASSET_UPLOAD_BYTES),
     )
-    if resp.status_code != 200:
-        raise ScraperError(f"Failed to download product image (HTTP {resp.status_code}).")
-    data = resp.content
+    if status_code != 200:
+        raise ScraperError(f"Failed to download product image (HTTP {status_code}).")
     mime, ext = validate_image_bytes(data)
     return data, mime, ext

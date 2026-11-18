@@ -150,31 +150,33 @@ export const StudioHeader: React.FC<StudioHeaderProps> = ({
 
         {/* Right Telemetry & Actions */}
         <div className="flex flex-wrap items-center gap-2.5">
-          {/* UI State Preview Toggle */}
-          <div
-            className="flex items-center gap-1 rounded border border-[#27272A] bg-[#09090B] p-1"
-            role="group"
-            aria-label="UI State Inspector"
-          >
-            <Layers className="ml-1.5 mr-1 h-3.5 w-3.5 text-[#A1A1AA]" />
-            {VIEW_MODES.map((mode) => {
-              const active = viewStateMode === mode.id;
-              return (
-                <button
-                  key={mode.id}
-                  type="button"
-                  onClick={() => onChangeViewStateMode(mode.id)}
-                  className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
-                    active
-                      ? 'bg-[#6366F1] text-[#FAFAFA]'
-                      : 'text-[#A1A1AA] hover:text-[#FAFAFA]'
-                  }`}
-                >
-                  {mode.label}
-                </button>
-              );
-            })}
-          </div>
+          {/* UI State Preview Toggle (dev/test only) */}
+          {process.env.NODE_ENV !== 'production' ? (
+            <div
+              className="flex items-center gap-1 rounded border border-[#27272A] bg-[#09090B] p-1"
+              role="group"
+              aria-label="UI State Inspector"
+            >
+              <Layers className="ml-1.5 mr-1 h-3.5 w-3.5 text-[#A1A1AA]" />
+              {VIEW_MODES.map((mode) => {
+                const active = viewStateMode === mode.id;
+                return (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    onClick={() => onChangeViewStateMode(mode.id)}
+                    className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
+                      active
+                        ? 'bg-[#6366F1] text-[#FAFAFA]'
+                        : 'text-[#A1A1AA] hover:text-[#FAFAFA]'
+                    }`}
+                  >
+                    {mode.label}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
 
           {/* Render Count Pill */}
           <div className="hidden items-center gap-2 rounded border border-[#27272A] bg-[#09090B] px-3 py-1.5 sm:flex">
@@ -219,6 +221,7 @@ export const StudioHeader: React.FC<StudioHeaderProps> = ({
             disabled={!user}
             onClick={onRefreshAll}
             title="Sync Workspace & Render Queue"
+            aria-label="Sync Workspace and Render Queue"
             className="flex h-8 w-8 items-center justify-center rounded border border-[#27272A] bg-[#09090B] text-[#A1A1AA] transition-colors hover:border-[#FAFAFA] hover:text-[#FAFAFA] disabled:opacity-50"
           >
             <RefreshCw className="h-3.5 w-3.5" />
@@ -246,6 +249,7 @@ export const StudioHeader: React.FC<StudioHeaderProps> = ({
                 type="button"
                 onClick={() => void onLogout()}
                 title="Sign out"
+                aria-label="Sign out"
                 className="ml-1 text-[#A1A1AA] hover:text-red-400"
               >
                 <LogOut className="h-3.5 w-3.5" />

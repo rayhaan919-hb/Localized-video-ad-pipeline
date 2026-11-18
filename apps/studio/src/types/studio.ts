@@ -86,6 +86,7 @@ export interface ScrapedProductMetadata {
   price: string;
   original_price?: string;
   discount_badge?: string;
+  description?: string;
   features: string[];
   image_url: string;
   image_candidates?: string[];

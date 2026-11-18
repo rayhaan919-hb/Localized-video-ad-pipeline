@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2,
   KeyRound,
@@ -27,7 +27,8 @@ interface AuthModalProps {
   onClose?: () => void;
   onAuthSuccess: (
     user: AuthUserSummary,
-    preferredWorkspaceId?: string
+    preferredWorkspaceId?: string,
+    devVerifyToken?: string
   ) => void;
 }
 
@@ -59,6 +60,29 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setMode(initialMode);
+      setErrorMsg(null);
+      if (currentUserEmail) {
+        setEmail(currentUserEmail);
+      }
+    }
+  }, [isOpen, initialMode, currentUserEmail]);
+
+  useEffect(() => {
+    if (!isOpen || isBlockingGate || !onClose) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, isBlockingGate, onClose]);
 
   if (!isOpen) {
     return null;
@@ -106,7 +130,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             `Account created. Dev verification token: ${data.verify_email_token}`
           );
         }
-        onAuthSuccess(data.user, data.primary_workspace_id);
+        onAuthSuccess(
+          data.user,
+          data.primary_workspace_id,
+          data.verify_email_token
+        );
         return;
       }
 

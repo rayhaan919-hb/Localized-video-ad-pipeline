@@ -162,6 +162,8 @@ class Settings(BaseSettings):
     RATE_LIMIT_API_PER_MINUTE: int = 120
     AUTH_LOCKOUT_MAX_ATTEMPTS: int = 5
     AUTH_LOCKOUT_WINDOW_SECONDS: int = 900
+    TRUST_PROXY_HEADERS: bool = False
+    MAX_RENDERED_VIDEO_BYTES: int = 100 * 1024 * 1024
     STORAGE_ROOT: str = str(STORAGE_DIR)
     USE_REMOTION_CLI: bool = False
     DEFAULT_DURATION_SECONDS: float = 4.0
@@ -303,6 +305,14 @@ class Settings(BaseSettings):
     @property
     def use_remotion_cli(self) -> bool:
         return _env_bool("USE_REMOTION_CLI", self.USE_REMOTION_CLI)
+
+    @property
+    def effective_trust_proxy_headers(self) -> bool:
+        return _env_bool("TRUST_PROXY_HEADERS", self.TRUST_PROXY_HEADERS)
+
+    @property
+    def effective_max_rendered_video_bytes(self) -> int:
+        return max(1024, _env_int("MAX_RENDERED_VIDEO_BYTES", self.MAX_RENDERED_VIDEO_BYTES))
 
     def get_stripe_price_id(self, pack_id: str) -> str:
         pkg = CREDIT_PACKAGES.get(pack_id)

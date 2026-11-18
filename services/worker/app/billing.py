@@ -11,7 +11,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import CREDIT_PACKAGES, settings
@@ -218,6 +219,23 @@ def process_stripe_webhook(
     except Exception as exc:
         raise WebhookValidationError("Webhook payload is not valid UTF-8 JSON.") from exc
 
+    try:
+        return _process_stripe_webhook_inner(session, event=event)
+    except IntegrityError:
+        session.rollback()
+        return {
+            "received": True,
+            "status": "duplicate_ignored",
+            "event_id": str(event.get("id") or "").strip(),
+            "event_type": str(event.get("type") or "").strip(),
+        }
+
+
+def _process_stripe_webhook_inner(
+    session: Session,
+    *,
+    event: dict[str, Any],
+) -> dict[str, Any]:
     event_id = str(event.get("id") or "").strip()
     event_type = str(event.get("type") or "").strip()
     obj = (event.get("data") or {}).get("object") or {}
@@ -233,7 +251,10 @@ def process_stripe_webhook(
             "event_type": event_type,
         }
 
-    if event_type == "checkout.session.completed":
+    if event_type in (
+        "checkout.session.completed",
+        "checkout.session.async_payment_succeeded",
+    ):
         payment_status = str(obj.get("payment_status") or "").lower()
         if payment_status != "paid":
             session.add(
@@ -390,13 +411,59 @@ def process_stripe_webhook(
             session.commit()
             return {"received": True, "status": "refund_unmatched", "event_id": event_id}
 
+        already_revoked = int(
+            session.scalar(
+                select(func.coalesce(func.sum(-StripeEvent.credits_delta), 0)).where(
+                    StripeEvent.payment_intent_id == payment_intent_id,
+                    StripeEvent.credits_delta < 0,
+                )
+            )
+            or 0
+        )
         original_credits = int(purchase_event.credits_delta)
         amount_total = int(purchase_event.amount_cents or obj.get("amount") or 0)
         amount_refunded = int(obj.get("amount_refunded") or obj.get("amount") or amount_total)
         if amount_total > 0 and amount_refunded < amount_total:
-            credits_to_revoke = max(1, round(original_credits * (amount_refunded / amount_total)))
+            target_total_revoked = max(
+                1, round(original_credits * (amount_refunded / amount_total))
+            )
         else:
-            credits_to_revoke = original_credits
+            target_total_revoked = original_credits
+
+        credits_to_revoke = max(
+            0, min(original_credits, target_total_revoked) - already_revoked
+        )
+        if credits_to_revoke == 0:
+            ws_cur = session.get(Workspace, purchase_event.workspace_id)
+            cur_balance = int(ws_cur.credit_balance) if ws_cur else 0
+            session.add(
+                StripeEvent(
+                    id=str(uuid.uuid4()),
+                    stripe_event_id=event_id,
+                    event_type=event_type,
+                    payment_intent_id=payment_intent_id,
+                    workspace_id=purchase_event.workspace_id,
+                    user_id=purchase_event.user_id,
+                    pack_id=purchase_event.pack_id,
+                    amount_cents=amount_refunded,
+                    currency=purchase_event.currency,
+                    credits_delta=0,
+                    status="refund_already_accounted",
+                    payload_summary={
+                        "new_balance": cur_balance,
+                        "already_revoked": already_revoked,
+                    },
+                    created_at=utcnow(),
+                )
+            )
+            session.commit()
+            return {
+                "received": True,
+                "status": "refund_already_accounted",
+                "event_id": event_id,
+                "credits_revoked": 0,
+                "credit_balance": cur_balance,
+            }
 
         new_balance, actual_revoked = reverse_credits_for_payment_refund(
             session,

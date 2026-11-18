@@ -152,21 +152,59 @@ CREATE INDEX IF NOT EXISTS idx_credit_ledger_workspace_created_at ON credit_ledg
 CREATE INDEX IF NOT EXISTS idx_stripe_events_payment_intent ON stripe_events (payment_intent_id);
 
 -- Supabase Row-Level Security (RLS) multi-tenant policies
+ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE auth_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE stripe_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workspaces ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workspace_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workspace_assets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE video_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE credit_ledger ENABLE ROW LEVEL SECURITY;
 
+-- Security-definer helpers prevent infinite RLS recursion on workspace_members
+CREATE OR REPLACE FUNCTION public.is_workspace_member(target_workspace_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.workspace_members wm
+    WHERE wm.workspace_id = target_workspace_id
+      AND wm.user_id = (SELECT auth.uid())
+  );
+$$;
+
+CREATE OR REPLACE FUNCTION public.is_workspace_admin(target_workspace_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.workspace_members wm
+    WHERE wm.workspace_id = target_workspace_id
+      AND wm.user_id = (SELECT auth.uid())
+      AND wm.role IN ('owner', 'admin')
+  );
+$$;
+
+REVOKE ALL ON FUNCTION public.is_workspace_member(UUID) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.is_workspace_admin(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.is_workspace_member(UUID) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.is_workspace_admin(UUID) TO authenticated, service_role;
+
+-- Sensitive internal tables (users, auth_sessions, stripe_events, schema_migrations)
+-- keep RLS enabled with no permissive anon/authenticated policies (default deny for PostgREST).
+
 CREATE POLICY workspaces_member_select
   ON workspaces FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM workspace_members wm
-      WHERE wm.workspace_id = workspaces.id
-        AND wm.user_id = (SELECT auth.uid())
-    )
-  );
+  USING (public.is_workspace_member(id));
 
 CREATE POLICY workspaces_owner_insert
   ON workspaces FOR INSERT
@@ -174,58 +212,36 @@ CREATE POLICY workspaces_owner_insert
 
 CREATE POLICY workspaces_admin_update
   ON workspaces FOR UPDATE
-  USING (
-    EXISTS (
-      SELECT 1 FROM workspace_members wm
-      WHERE wm.workspace_id = workspaces.id
-        AND wm.user_id = (SELECT auth.uid())
-        AND wm.role IN ('owner', 'admin')
-    )
-  );
+  USING (public.is_workspace_admin(id))
+  WITH CHECK (public.is_workspace_admin(id));
 
 CREATE POLICY workspace_members_select
   ON workspace_members FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM workspace_members wm
-      WHERE wm.workspace_id = workspace_members.workspace_id
-        AND wm.user_id = (SELECT auth.uid())
-    )
-  );
+  USING (public.is_workspace_member(workspace_id));
+
+CREATE POLICY workspace_members_admin_insert
+  ON workspace_members FOR INSERT
+  WITH CHECK (public.is_workspace_admin(workspace_id));
+
+CREATE POLICY workspace_members_admin_update
+  ON workspace_members FOR UPDATE
+  USING (public.is_workspace_admin(workspace_id))
+  WITH CHECK (public.is_workspace_admin(workspace_id));
+
+CREATE POLICY workspace_members_admin_delete
+  ON workspace_members FOR DELETE
+  USING (public.is_workspace_admin(workspace_id));
 
 CREATE POLICY workspace_assets_member_all
   ON workspace_assets FOR ALL
-  USING (
-    EXISTS (
-      SELECT 1 FROM workspace_members wm
-      WHERE wm.workspace_id = workspace_assets.workspace_id
-        AND wm.user_id = (SELECT auth.uid())
-    )
-  );
+  USING (public.is_workspace_member(workspace_id))
+  WITH CHECK (public.is_workspace_member(workspace_id));
 
 CREATE POLICY video_jobs_member_all
   ON video_jobs FOR ALL
-  USING (
-    EXISTS (
-      SELECT 1 FROM workspace_members wm
-      WHERE wm.workspace_id = video_jobs.workspace_id
-        AND wm.user_id = (SELECT auth.uid())
-    )
-  )
-  WITH CHECK (
-    EXISTS (
-      SELECT 1 FROM workspace_members wm
-      WHERE wm.workspace_id = video_jobs.workspace_id
-        AND wm.user_id = (SELECT auth.uid())
-    )
-  );
+  USING (public.is_workspace_member(workspace_id))
+  WITH CHECK (public.is_workspace_member(workspace_id));
 
 CREATE POLICY credit_ledger_member_select
   ON credit_ledger FOR SELECT
-  USING (
-    EXISTS (
-      SELECT 1 FROM workspace_members wm
-      WHERE wm.workspace_id = credit_ledger.workspace_id
-        AND wm.user_id = (SELECT auth.uid())
-    )
-  );
+  USING (public.is_workspace_member(workspace_id));

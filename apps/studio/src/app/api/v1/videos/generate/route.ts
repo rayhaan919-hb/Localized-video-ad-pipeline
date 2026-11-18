@@ -32,6 +32,7 @@ interface GenerateRequestBody {
     productImageUrl?: string;
     productImageAssetId?: string;
     captions?: CaptionSegment[];
+    confirmedMetadata?: Record<string, unknown>;
   };
 }
 

@@ -61,7 +61,8 @@ When `APP_ENV=production`, `services/worker/app/config.py` (`validate_production
   - Build with `npm run build` and run via `npm run start` behind HTTPS TLS termination (Vercel, Cloud Run, Fly.io, or Docker + Nginx).
   - Set `[SERVER-ONLY]` variables (`WORKER_API_URL`, `WORKER_API_KEY`) strictly in server runtime env — never with `NEXT_PUBLIC_`.
 - **FastAPI API (`services/worker`)**:
-  - Run behind a reverse proxy with HTTPS termination, `X-Forwarded-For` trusted appropriately, and Uvicorn/Gunicorn workers:
+  - Install production driver extras (`psycopg`, `redis`, `google-auth`): `pip install -e ".[prod]"`
+  - Run behind a reverse proxy with HTTPS termination, `TRUST_PROXY_HEADERS=true` and `X-Forwarded-For` trusted cleanly, and Uvicorn/Gunicorn workers:
     `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2`
 - **Celery Background Workers**:
   - Set `CELERY_ALWAYS_EAGER=false` and `REDIS_URL=redis://...` (or `rediss://...`).

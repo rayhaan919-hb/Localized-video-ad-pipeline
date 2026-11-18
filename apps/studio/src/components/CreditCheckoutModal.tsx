@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import {
   AlertTriangle,
   ArrowDownRight,
@@ -46,6 +46,19 @@ export const CreditCheckoutModal: React.FC<CreditCheckoutModalProps> = ({
   onDevTopup,
   onRetryFetchCredits,
 }) => {
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
+
   if (!isOpen) {
     return null;
   }
@@ -254,7 +267,7 @@ export const CreditCheckoutModal: React.FC<CreditCheckoutModalProps> = ({
               </p>
             </div>
           ) : (
-            <div className="max-h-56 overflow-y-auto rounded border border-[#27272A] bg-[#09090B]">
+            <div className="max-h-56 overflow-x-auto overflow-y-auto rounded border border-[#27272A] bg-[#09090B]">
               <table className="w-full border-collapse text-left text-xs">
                 <thead>
                   <tr className="border-b border-[#27272A] bg-[#18181B] text-[11px] text-[#A1A1AA]">

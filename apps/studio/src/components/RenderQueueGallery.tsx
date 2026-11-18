@@ -390,6 +390,7 @@ export const RenderQueueGallery: React.FC<RenderQueueGalleryProps> = ({
                           type="button"
                           onClick={() => onCopySignedUrl(job.id)}
                           title="Copy Signed Download URL"
+                          aria-label="Copy Signed Download URL"
                           className="flex items-center justify-center rounded border border-[#27272A] bg-[#18181B] px-2 py-1.5 text-xs text-[#A1A1AA] hover:border-[#6366F1] hover:text-[#FAFAFA]"
                         >
                           <Link className="h-3.5 w-3.5" />

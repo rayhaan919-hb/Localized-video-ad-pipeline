@@ -25,9 +25,10 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import AnyHttpUrl, BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 import app.db as db_module
@@ -76,7 +77,12 @@ from app.db import (
     reserve_credit_atomically,
     utcnow,
 )
-from app.scraper import UnsafeUrlError, scrape_product_url, validate_image_bytes
+from app.scraper import (
+    UnsafeUrlError,
+    scrape_product_url,
+    validate_image_bytes,
+    validate_public_http_url,
+)
 from app.security import RequestContextMiddleware, get_client_ip, log_audit_event, rate_limiter
 from app.storage import (
     StorageError,
@@ -85,7 +91,8 @@ from app.storage import (
     resolve_workspace_rel_path,
     verify_signed_download_token,
 )
-from app.tasks import process_video_job, recover_interrupted_jobs
+from app.tasks import celery_app, process_video_job, recover_interrupted_jobs
+from app.veo import get_ffmpeg_binary
 
 LanguageCode = Literal["ur", "ar", "hi", "en"]
 AspectRatioCode = Literal["9:16", "16:9"]
@@ -293,7 +300,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     """Validate production security settings, migrate schema, and recover interrupted jobs."""
     validate_production_config()
     init_db()
-    recover_interrupted_jobs()
+    recover_interrupted_jobs(min_age_seconds=0 if celery_app.conf.task_always_eager else 900)
     yield
 
 
@@ -306,29 +313,45 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_cors_origins = settings.effective_cors_origins
 app.add_middleware(RequestContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.effective_cors_origins,
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials="*" not in _cors_origins,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=[
         "Authorization",
         "Content-Type",
         "Idempotency-Key",
         "X-Request-ID",
-        "X-Admin-Secret",
     ],
 )
 
 
 @app.get("/health")
-def health_check() -> dict[str, Any]:
-    """Readiness probe exposing operational capabilities without sensitive credentials."""
-    return {
-        "status": "ok",
+def health_check() -> Any:
+    """Readiness probe checking DB connectivity & FFmpeg without exposing sensitive creds."""
+    db_ok = False
+    try:
+        with db_module.SessionLocal() as session:
+            session.execute(text("SELECT 1"))
+            db_ok = True
+    except Exception:
+        db_ok = False
+
+    ffmpeg_available = False
+    try:
+        ffmpeg_available = bool(get_ffmpeg_binary())
+    except Exception:
+        ffmpeg_available = False
+
+    payload = {
+        "status": "ok" if db_ok else "degraded",
         "service": "localized-video-ad-worker",
         "environment": settings.effective_app_env,
+        "database": "ok" if db_ok else "error",
+        "ffmpeg_available": ffmpeg_available,
         "veo_model": settings.VEO_MODEL,
         "mock_vertex_veo": settings.is_mock_veo,
         "mock_tts": settings.is_mock_tts,
@@ -337,6 +360,9 @@ def health_check() -> dict[str, Any]:
         ),
         "redis_broker": is_redis_reachable(settings.REDIS_URL),
     }
+    if not db_ok:
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=payload)
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -1089,6 +1115,17 @@ def generate_video(
         if existing_job is not None:
             return _serialize_job(existing_job, credit_balance=ws.credit_balance)
 
+    if payload.simulate_failure and settings.is_production:
+        raise HTTPException(
+            status_code=400,
+            detail="Failure simulation is disabled in production.",
+        )
+
+    try:
+        validate_public_http_url(str(payload.product_url))
+    except UnsafeUrlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     if not settings.is_mock_veo and int(round(payload.duration_seconds)) not in (4, 6, 8):
         raise HTTPException(
             status_code=400,
@@ -1114,8 +1151,24 @@ def generate_video(
         created_at=now,
         updated_at=now,
     )
-    db.add(job)
-    db.flush()
+    try:
+        db.add(job)
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        if resolved_idem is not None:
+            existing_job = db.scalar(
+                select(VideoJob).where(
+                    VideoJob.workspace_id == ws.id,
+                    VideoJob.idempotency_key == resolved_idem,
+                )
+            )
+            if existing_job is not None:
+                ws_cur = db.get(Workspace, ws.id)
+                return _serialize_job(
+                    existing_job, credit_balance=ws_cur.credit_balance if ws_cur else None
+                )
+        raise
 
     try:
         reserve_credit_atomically(

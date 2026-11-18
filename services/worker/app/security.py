@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import re
@@ -138,17 +139,37 @@ rate_limiter = SlidingWindowRateLimiter()
 
 
 def get_client_ip(request: Request) -> str:
-    """Extract caller IP cleanly from forwarded header or peer address."""
-    forwarded = request.headers.get("x-forwarded-for", "").strip()
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """Extract caller IP safely; only trust proxy X-Forwarded-For when explicitly enabled.
+
+    When TRUST_PROXY_HEADERS=true behind a reverse proxy, we take the rightmost
+    non-empty entry appended by the proxy so client-supplied left-side values
+    cannot spoof rate limits. Otherwise we strictly use the peer TCP address.
+    """
+    if settings.effective_trust_proxy_headers:
+        forwarded = request.headers.get("x-forwarded-for", "").strip()
+        if forwarded:
+            parts = [part.strip() for part in forwarded.split(",") if part.strip()]
+            if parts:
+                return parts[-1]
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
 
 
+def _is_exempt_from_worker_api_key(request: Request) -> bool:
+    path = request.url.path
+    if request.method == "OPTIONS" or path == "/health":
+        return True
+    if path == "/v1/billing/webhooks/stripe":
+        return True
+    if path.startswith("/v1/videos/") and path.endswith("/download"):
+        if bool(request.query_params.get("token")):
+            return True
+    return False
+
+
 class RequestContextMiddleware(BaseHTTPMiddleware):
-    """Enforce request body size limits, attach X-Request-ID, and emit structured access logs."""
+    """Enforce request limits, worker API key gate, X-Request-ID, and structured access logs."""
 
     async def dispatch(self, request: Request, call_next):
         raw_req_id = request.headers.get("x-request-id", "").strip()
@@ -188,6 +209,37 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                     },
                     headers={"X-Request-ID": req_id},
                 )
+
+        # Enforce internal BFF-to-Worker API key when configured or required in production.
+        if request.url.path.startswith("/v1/") and not _is_exempt_from_worker_api_key(request):
+            configured_key = settings.effective_worker_api_key
+            if settings.is_production and not configured_key:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "Worker internal key is not configured.",
+                        "request_id": req_id,
+                    },
+                    headers={"X-Request-ID": req_id},
+                )
+            if configured_key:
+                supplied = request.headers.get("x-worker-api-key", "").strip()
+                if not supplied or not hmac.compare_digest(supplied, configured_key):
+                    log_audit_event(
+                        "worker_api_key_rejected",
+                        level="WARNING",
+                        request_id=req_id,
+                        ip_address=get_client_ip(request),
+                        details={"path": request.url.path},
+                    )
+                    return JSONResponse(
+                        status_code=401,
+                        content={
+                            "detail": "Invalid or missing worker service API key.",
+                            "request_id": req_id,
+                        },
+                        headers={"X-Request-ID": req_id},
+                    )
 
         started = time.perf_counter()
         response = await call_next(request)

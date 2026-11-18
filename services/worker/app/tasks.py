@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import timedelta
 from typing import Any
 
 from celery import Celery
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 import app.db as db_module
 from app.compositor import composite_final_video
@@ -182,7 +183,9 @@ def process_video_job(
                 metadata = scrape_product_url(
                     product_url,
                     target_language=target_language,
-                    fetch_live="simulate-fail" not in product_url.lower(),
+                    fetch_live=not (
+                        not settings.is_production and "simulate-fail" in product_url.lower()
+                    ),
                 )
 
             script_data = generate_localized_script(
@@ -201,7 +204,9 @@ def process_video_job(
                 script_data,
             )
 
-            if simulate_failure or "simulate-fail" in product_url.lower():
+            if not settings.is_production and (
+                simulate_failure or "simulate-fail" in product_url.lower()
+            ):
                 raise RuntimeError("PIPELINE_SIMULATED_FAILURE: Requested failure simulation.")
 
             audio_dir = get_workspace_subdir(workspace_id, "audio")
@@ -297,10 +302,33 @@ def process_video_job(
             if source_clip_path:
                 source_clip_path.unlink(missing_ok=True)
 
-            if _is_job_cancelled(session, normalized_job_id):
+            completed_at = utcnow()
+            if "COMPLETED" not in history:
+                history.append("COMPLETED")
+            script_data["final_mp4_size_bytes"] = validation["size_bytes"]
+            script_data["video_validation"] = validation
+            script_data["status_history"] = list(history)
+
+            # Atomic conditional transition guarantees a late cancel is never overwritten
+            upd_res = session.execute(
+                update(VideoJob)
+                .where(VideoJob.id == normalized_job_id, VideoJob.status != "CANCELLED")
+                .values(
+                    storage_rel_path=asset.storage_rel_path,
+                    final_mp4_url=f"/api/v1/renders/{job.id}",
+                    completed_at=completed_at,
+                    status="COMPLETED",
+                    progress_pct=100,
+                    stage_detail="Completed and verified in workspace private storage",
+                    script_json=dict(script_data),
+                    updated_at=completed_at,
+                )
+            )
+            if upd_res.rowcount == 0:
                 resolve_workspace_rel_path(workspace_id, asset.storage_rel_path).unlink(
                     missing_ok=True
                 )
+                session.delete(asset)
                 refund_credit_atomically(
                     session,
                     workspace_id=workspace_id,
@@ -315,15 +343,6 @@ def process_video_job(
                     "workspace_id": workspace_id,
                     "status": "CANCELLED",
                 }
-
-            job.storage_rel_path = asset.storage_rel_path
-            job.final_mp4_url = f"/api/v1/renders/{job.id}"
-            job.completed_at = utcnow()
-            script_data["final_mp4_size_bytes"] = validation["size_bytes"]
-            script_data["video_validation"] = validation
-            _transition(
-                "COMPLETED", 100, "Completed and verified in workspace private storage", script_data
-            )
 
             finalize_credit_deduction(
                 session,
@@ -402,7 +421,7 @@ def process_video_job(
             }
 
 
-def recover_interrupted_jobs() -> int:
+def recover_interrupted_jobs(min_age_seconds: int = 0) -> int:
     """Recover in-flight jobs left incomplete by an unclean worker shutdown cleanly."""
     in_flight_statuses = (
         "CREATED",
@@ -415,9 +434,11 @@ def recover_interrupted_jobs() -> int:
     )
     recovered = 0
     with db_module.SessionLocal() as session:
-        jobs = list(
-            session.scalars(select(VideoJob).where(VideoJob.status.in_(in_flight_statuses))).all()
-        )
+        stmt = select(VideoJob).where(VideoJob.status.in_(in_flight_statuses))
+        if min_age_seconds > 0:
+            cutoff = utcnow() - timedelta(seconds=min_age_seconds)
+            stmt = stmt.where(VideoJob.updated_at <= cutoff)
+        jobs = list(session.scalars(stmt).all())
         for job in jobs:
             job.status = "FAILED"
             job.progress_pct = 0

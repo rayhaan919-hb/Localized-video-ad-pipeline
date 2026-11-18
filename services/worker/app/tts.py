@@ -345,7 +345,7 @@ def _try_generate_gemini_copy(
     )
     endpoint = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.5-flash:generateContent?key={api_key}"
+        "gemini-2.5-flash:generateContent"
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -353,7 +353,11 @@ def _try_generate_gemini_copy(
     }
     try:
         with httpx.Client(timeout=10.0) as client:
-            resp = client.post(endpoint, json=payload)
+            resp = client.post(
+                endpoint,
+                headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+                json=payload,
+            )
             if resp.status_code != 200:
                 return None
             data = resp.json()
@@ -544,8 +548,7 @@ def _synthesize_cloud_tts_wav(
     if token:
         headers["Authorization"] = f"Bearer {token}"
     elif api_key:
-        sep = "&" if "?" in url else "?"
-        url = f"{url}{sep}key={api_key}"
+        headers["x-goog-api-key"] = api_key
 
     payload = {
         "input": {"text": text_to_speak[:900]},

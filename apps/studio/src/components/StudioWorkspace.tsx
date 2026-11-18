@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ShieldAlert } from 'lucide-react';
 import {
   getPresetAdProps,
@@ -118,14 +118,59 @@ export const StudioWorkspace: React.FC = () => {
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [bannerMessage, setBannerMessage] = useState<string | null>(null);
 
+  const refreshPromiseRef = useRef<Promise<boolean> | null>(null);
+
+  const refreshAccessToken = useCallback(async (): Promise<boolean> => {
+    if (refreshPromiseRef.current) {
+      return refreshPromiseRef.current;
+    }
+    const promise = (async () => {
+      try {
+        const res = await fetch('/api/v1/auth/refresh', {
+          method: 'POST',
+          credentials: 'include',
+          cache: 'no-store',
+        });
+        return res.ok;
+      } catch {
+        return false;
+      } finally {
+        refreshPromiseRef.current = null;
+      }
+    })();
+    refreshPromiseRef.current = promise;
+    return promise;
+  }, []);
+
+  const fetchWithAuthRetry = useCallback(
+    async (input: string, init?: RequestInit): Promise<Response> => {
+      const firstRes = await fetch(input, {
+        ...init,
+        credentials: 'include',
+        cache: 'no-store',
+      });
+      if (firstRes.status !== 401) {
+        return firstRes;
+      }
+      const refreshed = await refreshAccessToken();
+      if (!refreshed) {
+        return firstRes;
+      }
+      return fetch(input, {
+        ...init,
+        credentials: 'include',
+        cache: 'no-store',
+      });
+    },
+    [refreshAccessToken]
+  );
+
   // Fetch authenticated user & workspaces on mount
   const bootstrapSession = useCallback(async () => {
     setIsAuthChecking(true);
     try {
-      const res = await fetch('/api/v1/auth/me', {
+      const res = await fetchWithAuthRetry('/api/v1/auth/me', {
         method: 'GET',
-        credentials: 'include',
-        cache: 'no-store',
       });
       if (!res.ok) {
         setUser(null);
@@ -155,7 +200,7 @@ export const StudioWorkspace: React.FC = () => {
     } finally {
       setIsAuthChecking(false);
     }
-  }, []);
+  }, [fetchWithAuthRetry]);
 
   useEffect(() => {
     void bootstrapSession();
@@ -183,9 +228,8 @@ export const StudioWorkspace: React.FC = () => {
     setIsLoadingCredits(true);
     setCreditsError(null);
     try {
-      const response = await fetch(
-        `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/credits`,
-        { cache: 'no-store', credentials: 'include' }
+      const response = await fetchWithAuthRetry(
+        `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/credits`
       );
       if (response.status === 401) {
         setUser(null);
@@ -207,7 +251,7 @@ export const StudioWorkspace: React.FC = () => {
     } finally {
       setIsLoadingCredits(false);
     }
-  }, [user, workspaceId]);
+  }, [user, workspaceId, fetchWithAuthRetry]);
 
   // Fetch workspace video jobs
   const fetchVideoJobs = useCallback(async () => {
@@ -217,9 +261,8 @@ export const StudioWorkspace: React.FC = () => {
     setIsLoadingJobs(true);
     setJobsError(null);
     try {
-      const response = await fetch(
-        `/api/v1/videos?workspace_id=${encodeURIComponent(workspaceId)}`,
-        { cache: 'no-store', credentials: 'include' }
+      const response = await fetchWithAuthRetry(
+        `/api/v1/videos?workspace_id=${encodeURIComponent(workspaceId)}`
       );
       if (response.status === 401) {
         setUser(null);
@@ -241,16 +284,15 @@ export const StudioWorkspace: React.FC = () => {
     } finally {
       setIsLoadingJobs(false);
     }
-  }, [user, workspaceId]);
+  }, [user, workspaceId, fetchWithAuthRetry]);
 
   const fetchWorkspaceAssets = useCallback(async () => {
     if (!user || !workspaceId) {
       return;
     }
     try {
-      const res = await fetch(
-        `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/assets`,
-        { cache: 'no-store', credentials: 'include' }
+      const res = await fetchWithAuthRetry(
+        `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/assets`
       );
       if (res.ok) {
         const data = (await res.json()) as { assets?: WorkspaceAssetItem[] };
@@ -259,7 +301,7 @@ export const StudioWorkspace: React.FC = () => {
     } catch {
       // Non-fatal UI asset list sync failure
     }
-  }, [user, workspaceId]);
+  }, [user, workspaceId, fetchWithAuthRetry]);
 
   useEffect(() => {
     if (user && workspaceId) {
@@ -294,14 +336,22 @@ export const StudioWorkspace: React.FC = () => {
   }, [user, workspaceId, jobs, fetchVideoJobs, fetchWorkspaceCredits]);
 
   const handleAuthSuccess = useCallback(
-    (nextUser: AuthUserSummary, preferredWorkspaceId?: string) => {
+    (
+      nextUser: AuthUserSummary,
+      preferredWorkspaceId?: string,
+      devVerifyToken?: string
+    ) => {
       setUser(nextUser);
       setWorkspaces(nextUser.workspaces ?? []);
       const targetWs =
         preferredWorkspaceId || nextUser.workspaces?.[0]?.id || '';
       setWorkspaceId(targetWs);
       setIsAuthModalOpen(false);
-      setBannerMessage(`Signed in cleanly as ${nextUser.email}.`);
+      setBannerMessage(
+        devVerifyToken
+          ? `Signed in cleanly as ${nextUser.email}. Dev email verification token: ${devVerifyToken}`
+          : `Signed in cleanly as ${nextUser.email}.`
+      );
     },
     []
   );
@@ -526,7 +576,7 @@ export const StudioWorkspace: React.FC = () => {
     setBannerMessage(null);
 
     try {
-      const response = await fetch('/api/v1/videos/generate', {
+      const response = await fetchWithAuthRetry('/api/v1/videos/generate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -535,7 +585,6 @@ export const StudioWorkspace: React.FC = () => {
               ? crypto.randomUUID()
               : `${Date.now()}`,
         },
-        credentials: 'include',
         body: JSON.stringify({
           workspace_id: workspaceId,
           product_url:
@@ -556,6 +605,15 @@ export const StudioWorkspace: React.FC = () => {
             hookText,
             ctaText,
             captions,
+            confirmedMetadata: {
+              title: productTitle,
+              brand: brandName,
+              currency,
+              price: priceDisplay,
+              image_url: productImageUrl,
+              features: scrapeMetadata?.features ?? [],
+              description: scrapeMetadata?.description ?? '',
+            },
           },
         }),
       });
@@ -633,6 +691,8 @@ export const StudioWorkspace: React.FC = () => {
     hookText,
     ctaText,
     captions,
+    scrapeMetadata,
+    fetchWithAuthRetry,
     fetchWorkspaceCredits,
   ]);
 

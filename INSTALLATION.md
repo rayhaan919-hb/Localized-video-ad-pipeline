@@ -43,6 +43,8 @@ source .venv/bin/activate
 # .\.venv\Scripts\Activate.ps1
 
 pip install -e ".[dev]"
+# For production PostgreSQL / Redis / GCP ADC drivers also include [prod]:
+# pip install -e ".[prod]"
 ```
 
 > **Note (Windows):** Core worker dependencies (`fastapi`, `sqlalchemy`, `httpx`, `pytest`, `ruff`) are pure Python or ship prebuilt wheels; no C/C++ build compiler is required.

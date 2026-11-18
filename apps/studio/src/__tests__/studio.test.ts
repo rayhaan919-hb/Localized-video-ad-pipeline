@@ -105,3 +105,32 @@ test('RTL/LTR font metadata and localized presets remain consistent', () => {
   assert.equal(urPreset.language, 'ur');
   assert.equal(urPreset.captions.length, 3);
 });
+
+test('security headers, AuthModal mode sync, and automatic token refresh are wired cleanly', () => {
+  const cwdCandidate = path.join(process.cwd(), 'next.config.mjs');
+  const studioRoot = fs.existsSync(cwdCandidate)
+    ? process.cwd()
+    : path.join(process.cwd(), 'apps', 'studio');
+
+  const nextConfigText = fs.readFileSync(
+    path.join(studioRoot, 'next.config.mjs'),
+    'utf-8'
+  );
+  assert.equal(nextConfigText.includes('X-Content-Type-Options'), true);
+  assert.equal(nextConfigText.includes('X-Frame-Options'), true);
+  assert.equal(nextConfigText.includes('Referrer-Policy'), true);
+  assert.equal(nextConfigText.includes('Permissions-Policy'), true);
+
+  const authModalText = fs.readFileSync(
+    path.join(studioRoot, 'src', 'components', 'AuthModal.tsx'),
+    'utf-8'
+  );
+  assert.equal(authModalText.includes('useEffect'), true);
+  assert.equal(authModalText.includes('setMode(initialMode)'), true);
+
+  const workspaceText = fs.readFileSync(
+    path.join(studioRoot, 'src', 'components', 'StudioWorkspace.tsx'),
+    'utf-8'
+  );
+  assert.equal(workspaceText.includes('/api/v1/auth/refresh'), true);
+});

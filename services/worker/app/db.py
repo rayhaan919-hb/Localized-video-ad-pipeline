@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    case,
     create_engine,
     event,
     select,
@@ -549,23 +550,22 @@ def finalize_credit_deduction(
         return int(ws.credit_balance if ws is not None else 0)
 
     release = cost if res_row is not None else 0
-    ws_stmt = (
-        update(Workspace)
-        .where(Workspace.id == ws_id)
-        .values(
-            reserved_balance=Workspace.reserved_balance - release
-            if release > 0
-            else Workspace.reserved_balance,
-            updated_at=utcnow(),
-        )
-        .returning(Workspace.credit_balance, Workspace.reserved_balance)
-    )
-    # Guard reserved_balance non-negative cleanly using SQLite/PG safe clamp if needed
     ws = session.get(Workspace, ws_id)
     if ws is None:
         return 0
-    if release > 0 and ws.reserved_balance >= release:
-        row = session.execute(ws_stmt).fetchone()
+    if release > 0:
+        row = session.execute(
+            update(Workspace)
+            .where(Workspace.id == ws_id)
+            .values(
+                reserved_balance=case(
+                    (Workspace.reserved_balance >= release, Workspace.reserved_balance - release),
+                    else_=0,
+                ),
+                updated_at=utcnow(),
+            )
+            .returning(Workspace.credit_balance, Workspace.reserved_balance)
+        ).fetchone()
         _expire_workspace_cache(session, ws_id)
         cur_balance = int(row[0]) if row else int(ws.credit_balance)
     else:
@@ -640,10 +640,13 @@ def refund_credit_atomically(
         .where(Workspace.id == ws_id)
         .values(
             credit_balance=Workspace.credit_balance + cost,
-            reserved_balance=Workspace.reserved_balance - release,
+            reserved_balance=case(
+                (Workspace.reserved_balance >= cost, Workspace.reserved_balance - cost),
+                else_=0,
+            ),
             updated_at=utcnow(),
         )
-        .returning(Workspace.credit_balance)
+        .returning(Workspace.credit_balance, Workspace.reserved_balance)
     ).fetchone()
     if row is None:
         return None

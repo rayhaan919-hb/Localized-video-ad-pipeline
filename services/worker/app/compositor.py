@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -43,7 +44,8 @@ def _highlight_caption_ass(text: str, highlight_word: str) -> str:
 
 
 def _build_ass_subtitles(script_json: dict[str, Any]) -> str:
-    font_name = str(script_json.get("font_family") or "Arial").strip() or "Arial"
+    raw_font = str(script_json.get("font_family") or "Arial")
+    font_name = re.sub(r"[^A-Za-z0-9 _-]", "", raw_font).strip() or "Arial"
     total_ms = max(1500, int(script_json.get("duration_ms") or 4000))
     end_ts = _format_ass_ts(total_ms)
     ratio = str(script_json.get("aspect_ratio") or "9:16")

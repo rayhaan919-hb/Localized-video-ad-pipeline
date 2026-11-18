@@ -75,10 +75,13 @@ def register_workspace_file(
     """Persist bytes inside workspace private storage and register a WorkspaceAsset record."""
     if len(data) == 0:
         raise StorageError("Uploaded asset cannot be empty.")
-    if len(data) > int(settings.MAX_ASSET_UPLOAD_BYTES):
-        raise StorageError(
-            f"Asset size exceeds maximum allowed limit of {settings.MAX_ASSET_UPLOAD_BYTES} bytes."
-        )
+    max_bytes = (
+        settings.effective_max_rendered_video_bytes
+        if asset_kind == "rendered_video"
+        else int(settings.MAX_ASSET_UPLOAD_BYTES)
+    )
+    if len(data) > max_bytes:
+        raise StorageError(f"Asset size exceeds maximum allowed limit of {max_bytes} bytes.")
 
     safe_name = sanitize_filename(filename, "asset.bin")
     ext = Path(safe_name).suffix[:16] or ".bin"
