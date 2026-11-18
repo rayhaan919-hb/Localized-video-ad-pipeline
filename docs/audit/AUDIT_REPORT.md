@@ -33,7 +33,7 @@
 | **Secrets & Git Hygiene** | **PASS** | Git history regex scan across all commits returned zero live `sk_live_`, `whsec_`, `AIza`, private keys, or JWTs; Google API keys moved from URL query string to `x-goog-api-key` header (`AUDIT-006`) |
 | **Web Hardening** | **PASS** | `RequestContextMiddleware` enforces body cap (`413`), rate limit (`429`), `X-Worker-API-Key` (`401`/`503`), `X-Forwarded-For` trust gate (`AUDIT-002`); Next.js security headers configured (`AUDIT-005`) |
 | **Billing & Webhooks** | **PASS** | Raw-body HMAC `Stripe-Signature` (300s replay tolerance), server-authoritative `pack_id` pricing, `stripe_events` dedup, `async_payment_succeeded`, cumulative partial refund accounting (`AUDIT-004`) |
-| **Dependencies (`npm audit` / `pip-audit`)** | **FAIL (CRITICAL)** | Upstream `npm audit --omit=dev` flags 3 Critical + 1 High CVE on `next@14.2.35`, `postcss`, and `remotion@4.0.242` (`AUDIT-007`) |
+| **Dependencies (`npm audit` / `pip-audit`)** | **PASS (PROD) — DEV MODERATE** | `npm audit --omit=dev` reports **`found 0 vulnerabilities`** after upgrading to React `19.3.1`, Next.js `16.4.6`, and Remotion `4.0.545` (`AUDIT-007` resolved; 6 moderate dev-only `minimatch` advisories remain in ESLint tooling) |
 | **Quality, Performance & Operability** | **PASS** | Zero lint errors (`ruff check .`, `eslint --max-warnings 0`), strict TS, `next build` passes cleanly, indexed tenant queries, live `/health` DB + FFmpeg probes, non-blocking mobile modal scroll, accessible icon `aria-label`s |
 
 ---
@@ -76,14 +76,8 @@
 - **Impact:** Query-string API keys risk exposure in proxy/HTTP client error logs; unexpected characters in `font_family` could break libass `[V4+ Styles]` lines.
 - **Fix Applied & Verified:** Moved Google API key to `x-goog-api-key` HTTP header cleanly and sanitized `font_family` with strict `[A-Za-z0-9 _-]` whitelist. Verified via full worker test suite (`27 passed`).
 
-### `AUDIT-007` [Critical — Upstream Dependency Risk] — OPEN (RELEASE BLOCKER FOR PUBLIC HOSTING)
-- **Location:** `package-lock.json`, `apps/studio/package.json` (`next@14.2.35`, `postcss@<=8.5.22`), `packages/remotion/package.json` (`remotion@4.0.242`, `@remotion/player@4.0.242`)
-- **Evidence:** Running `npm audit --omit=dev` flags **4 advisories (3 Critical, 1 High)**:
-  - `next` (`9.3.4-canary.0` – `16.3.0-preview.10`): Server Actions SSRF/DoS, Image Optimizer `remotePatterns` DoS/RCE, Request Smuggling in rewrites, Windows RCE, RSC cache poisoning (fix: `next@16.4.6`).
-  - `postcss` (`<=8.5.22`, nested under `next`): CSS `sourceMappingURL` path traversal / XSS in stringify.
-  - `remotion` / `@remotion/player` (`<=4.0.409`): RCE and arbitrary file write advisories (`GHSA-2jqp-f4gr-44fr`, `GHSA-g6pc-6676-c23j`, fix: `>=4.0.410`).
-- **Compensating Controls Active Today:**
-  1. Studio defines zero React Server Actions and zero Next.js `rewrites`.
-  2. Studio uses zero `next/image` `remotePatterns` image optimization endpoints.
-  3. `@remotion/player` runs exclusively in-browser on verified client props; server MP4 encoding in `services/worker` uses direct argument-list `ffmpeg` subprocesses (`USE_REMOTION_CLI=false` default).
-- **Recommended Fix:** Schedule a dedicated React 19 + Next.js 16.4.6+ + Remotion 4.0.545+ major dependency migration milestone before opening unrestricted self-serve public traffic on Linux/Windows.
+### `AUDIT-007` [Critical — Upstream Dependency Risk] — FIXED & VERIFIED
+- **Location:** `package-lock.json`, `apps/studio/package.json` (`next@^16.4.6`, `postcss@^8.5.33`), `packages/remotion/package.json` (`remotion@4.0.545`, `@remotion/player@4.0.545`, `react@^19.3.1`, `react-dom@^19.3.1`)
+- **Evidence:** Prior `npm audit --omit=dev` flagged **4 advisories (3 Critical, 1 High)** across `next@14.2.35`, `postcss@<=8.5.22`, and `remotion@4.0.242` / `@remotion/player@4.0.242`.
+- **Fix Applied & Verified:** Upgraded monorepo to React `19.3.1`, Next.js `16.4.6` (with async `Promise` dynamic `params` across all 10 App Router API route handlers), Remotion `4.0.545`, `lucide-react@^0.577.0`, `tailwindcss@^4.3.5`, and `postcss@^8.5.33`. Removed deprecated `eslint` config key from `apps/studio/next.config.mjs` and updated CI Node target to `22`.
+- **Post-Fix Verification:** `npm audit --omit=dev` now returns **`found 0 vulnerabilities`**. `verify:remotion`, `verify:studio` (including `next build` under Turbopack + `5/5` tests), and live browser smoke testing (`http://127.0.0.1:3000`, `@remotion/player@4.0.545` playing frames `00/60 -> 50/60`, async `[id]`/`[jobId]` routes, UR/AR/HI/EN switching) passed cleanly with zero console/runtime/hydration errors. *(DevDependencies retain 6 moderate `minimatch` advisories under `@typescript-eslint` v7 only.)*

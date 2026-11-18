@@ -6,9 +6,9 @@ import {
 } from '@/lib/serverStore';
 
 interface RouteContext {
-  params: {
+  params: Promise<{
     path: string[];
-  };
+  }>;
 }
 
 const ALLOWED_GET_PATHS = new Set(['me']);
@@ -30,7 +30,8 @@ export async function GET(
   request: Request,
   context: RouteContext
 ): Promise<NextResponse> {
-  const joined = resolveAuthPath(context.params.path);
+  const { path } = await context.params;
+  const joined = resolveAuthPath(path);
   if (!ALLOWED_GET_PATHS.has(joined)) {
     return NextResponse.json({ detail: 'Not found' }, { status: 404 });
   }
@@ -48,7 +49,8 @@ export async function POST(
   request: Request,
   context: RouteContext
 ): Promise<NextResponse> {
-  const joined = resolveAuthPath(context.params.path);
+  const { path } = await context.params;
+  const joined = resolveAuthPath(path);
   if (!ALLOWED_POST_PATHS.has(joined)) {
     return NextResponse.json({ detail: 'Not found' }, { status: 404 });
   }

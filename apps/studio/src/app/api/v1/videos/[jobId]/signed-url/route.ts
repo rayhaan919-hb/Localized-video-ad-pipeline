@@ -6,16 +6,17 @@ import {
 } from '@/lib/serverStore';
 
 interface RouteContext {
-  params: {
+  params: Promise<{
     jobId: string;
-  };
+  }>;
 }
 
 export async function GET(
   request: Request,
   context: RouteContext
 ): Promise<NextResponse> {
-  const jobId = (context.params.jobId ?? '').trim();
+  const { jobId: rawJobId } = await context.params;
+  const jobId = (rawJobId ?? '').trim();
   if (!jobId) {
     return NextResponse.json({ detail: 'jobId is required.' }, { status: 400 });
   }

@@ -6,16 +6,17 @@ import {
 } from '@/lib/serverStore';
 
 interface RouteContext {
-  params: {
+  params: Promise<{
     id: string;
-  };
+  }>;
 }
 
 export async function POST(
   request: Request,
   context: RouteContext
 ): Promise<NextResponse> {
-  const workspaceId = (context.params.id ?? '').trim();
+  const { id } = await context.params;
+  const workspaceId = (id ?? '').trim();
   if (!workspaceId) {
     return NextResponse.json(
       { detail: 'workspace id is required.' },

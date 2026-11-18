@@ -11,9 +11,8 @@
 The codebase has been upgraded from a single-tenant mock-first prototype into an isolated multi-tenant SaaS application with server-side authentication, workspace RBAC (`owner`/`admin`/`member`), transactional credit accounting, server-authoritative Stripe Checkout and signed webhook processing, SSRF-protected honest product scraping, strict live Vertex AI Veo / Cloud TTS integrations, private workspace media storage with signed downloads, and fail-closed production startup validation.
 
 **Verdict — `CONDITIONALLY READY`:**  
-All application code, security guardrails, database migrations, billing handlers, FFmpeg validation paths, and automated unit/integration tests pass locally (`24/24` worker tests, `4/4` studio tests, clean TypeScript/ESLint/Ruff checks, clean Next.js `14.2.35` production build). It is rated **CONDITIONALLY READY** rather than **UNCONDITIONALLY PRODUCTION READY** because:
-1. Live cloud rendering (`Vertex AI Veo 3.1`, `Google Cloud Text-to-Speech`, `GCS`), live payment settlement (`Stripe Live Webhooks`), and managed `PostgreSQL / Supabase` RLS execution could only be tested via local SQLite/wal, local FFmpeg binaries, and mocked external HTTP contracts (no buyer live GCP/Stripe/Supabase credentials exist in this workspace).
-2. Upstream npm packages constrained to React 18 compatibility (`next@14.2.35`, `remotion@4.0.242`) still carry published `npm audit` advisories requiring a coordinated major React 19 / Next 15–16 / Remotion 4.0.410+ upgrade prior to arbitrary multi-tenant public exposure (mitigated in the current architecture by disabling Server Actions, avoiding `next/image` remote proxy optimization, and running server-side video encoding directly via `ffmpeg`).
+All application code, security guardrails, database migrations, billing handlers, FFmpeg validation paths, dependency security (`npm audit --omit=dev`: `0 vulnerabilities` under React `19.3.1`, Next.js `16.4.6`, and Remotion `4.0.545`), and automated unit/integration tests pass locally (`27/27` worker tests, `5/5` studio tests, clean TypeScript/ESLint/Ruff checks, clean Next.js `16.4.6` Turbopack production build). It is rated **CONDITIONALLY READY** rather than **UNCONDITIONALLY PRODUCTION READY** because:
+1. Live cloud rendering (`Vertex AI Veo 3.1`, `Google Cloud Text-to-Speech`, `GCS`), live payment settlement (`Stripe Live Webhooks`), transactional email delivery (SMTP), and managed `PostgreSQL / Supabase` RLS execution could only be tested via local SQLite/WAL, local FFmpeg binaries, static SQL inspection, and mocked external HTTP contracts (no buyer live GCP/Stripe/Supabase credentials exist in this workspace).
 
 ---
 
@@ -40,7 +39,7 @@ All application code, security guardrails, database migrations, billing handlers
 
 ## C. Remaining Known Limitations
 
-1. **Upstream Node Package Advisories**: `npm audit --omit=dev` flags advisories on `next@14.2.35` / nested `postcss` (upstream recommends `next@16.4.6`) and `remotion@4.0.242` / `@remotion/player@4.0.242` (upstream recommends `>=4.0.410`). Upgrading to Next 15+/16+ requires a breaking migration to React 19 alongside testing `@remotion/player`.
+1. **Upstream Node Production Vulnerabilities**: Resolved — `npm audit --omit=dev` reports **0 vulnerabilities** on `react@19.3.1`, `next@16.4.6`, `postcss@8.5.33`, and `remotion@4.0.545` (`6` moderate advisories remain on dev-only ESLint `minimatch` packages). Keep `pip-audit` active in CI for Python packages.
 2. **External Provider E2E Tests**: Vertex AI Veo 3.1, Google Cloud TTS, and Stripe Checkout/Webhook live cloud round-trips were verified using contract/protocol tests (`httpx` mocks and HMAC signatures) rather than live paid GCP/Stripe accounts.
 3. **Typography & Multilingual Subtitling Fonts on Worker Container**: FFmpeg caption burn-in (`drawtext` / SRT / ASS subtitles) relies on RTL shaping libraries (`libass`, `harfbuzz`, `fribidi`) and system installation of `Noto Nastaliq Urdu`, `Noto Sans Arabic`, and `Noto Sans Devanagari` fonts inside the Linux worker container image.
 4. **Synchronous vs Asynchronous Execution**: Local dev defaults to `CELERY_ALWAYS_EAGER=true`. Production deployments MUST run Redis + dedicated Celery worker processes with shared/GCS object storage (`STORAGE_ROOT` / `GCS_BUCKET`).
@@ -52,7 +51,7 @@ All application code, security guardrails, database migrations, billing handlers
 - **Authentication**: Complete (`PBKDF2`, JWT, rotating refresh cookies, lockout, reset/verify).
 - **Authorization & Multi-Tenancy**: Enforced server-side via `require_workspace_role`; cross-tenant read/write/download/cancel/retry/checkout blocked with `403`/`401` and tested.
 - **SSRF / Path Traversal / Rate Limiting / Redaction**: Implemented and covered by automated `pytest` assertions.
-- **Gaps Before Launch**: Provision unique `>=32`-byte secrets in `.env` / Vault, deploy TLS reverse proxy, schedule upstream Next.js + Remotion major upgrade, and verify PostgreSQL RLS enforcement if enabling direct Supabase client queries.
+- **Gaps Before Launch**: Provision unique `>=32`-byte secrets in `.env` / Vault, deploy TLS reverse proxy with `TRUST_PROXY_HEADERS=true`, verify live PostgreSQL/Supabase RLS execution, and wire transactional SMTP for verify/reset emails.
 
 ---
 
@@ -85,10 +84,10 @@ All application code, security guardrails, database migrations, billing handlers
 | Scope | Command | Result Observed |
 |---|---|---|
 | Python Worker Lint | `services/worker`: `ruff check .` | Passed (`0` errors) |
-| Python Worker Suite | `services/worker`: `pytest -v` | **24 passed, 0 failed, 0 skipped** (auth lifecycle, RBAC, 2-tenant isolation, concurrency ledger, Stripe checkout/HMAC webhook/refund, SSRF, prod config guard, Veo/TTS failure handling, SQLite upgrade, cancel/recovery, 4-language MP4 rendering) |
-| Remotion Package | `packages/remotion`: `npm run typecheck && npm run lint` | Passed (`0` errors, `0` warnings) |
-| Studio Frontend Tests | `apps/studio`: `npm run test` | **4 passed, 0 failed, 0 skipped** (auth cookie/header propagation, render download URL normalization, removal of shared defaults/fake fallbacks, RTL/LTR metadata) |
-| Studio Build & Checks | `apps/studio`: `npm run typecheck && npm run lint && npm run build` | Passed (`0` TS errors, `0` ESLint warnings, compiled `Next.js 14.2.35` build across all 17 routes) |
+| Python Worker Suite | `services/worker`: `pytest -v` | **27 passed, 0 failed, 0 skipped** (auth lifecycle, `X-Worker-API-Key` + XFF spoof guard, RBAC, 2-tenant isolation, concurrency ledger, Stripe checkout/HMAC webhook/cumulative partial refunds, SSRF + byte cap, prod config guard, Veo/TTS failure handling, SQLite upgrade, cancel/recovery, 4-language MP4 rendering) |
+| Remotion Package | `packages/remotion`: `npm run typecheck && npm run lint` | Passed (`0` errors, `0` warnings) under React `19.3.1` & Remotion `4.0.545` |
+| Studio Frontend Tests | `apps/studio`: `npm run test` | **5 passed, 0 failed, 0 skipped** (auth cookie/header propagation, render download URL normalization, removal of shared defaults/fake fallbacks, RTL/LTR metadata, security headers, AuthModal mode sync & silent refresh) |
+| Studio Build & Checks | `apps/studio`: `npm run typecheck && npm run lint && npm run build` | Passed (`0` TS errors, `0` ESLint warnings, compiled `Next.js 16.4.6` Turbopack build across all 17 routes; `npm audit --omit=dev` -> **`0 vulnerabilities`**) |
 
 ---
 
@@ -107,4 +106,4 @@ Before onboarding paying customers:
 
 ## J. Final Verdict
 
-**Status:** `CONDITIONALLY READY` — Core multi-tenant architecture, security isolation, transactional billing ledger, Stripe webhooks, SSRF protections, Studio UI/BFF refactor, and automated tests are complete and passing cleanly. Final go-live requires provisioning buyer cloud credentials (PostgreSQL, GCP Vertex AI + TTS, Stripe Live) and scheduling the React 19 / Next 15–16 / Remotion 4.0.410+ dependency upgrade.
+**Status:** `CONDITIONALLY READY` — Core multi-tenant architecture, security isolation, transactional billing ledger, Stripe webhooks, SSRF protections, Studio UI/BFF refactor, React `19.3.1` / Next.js `16.4.6` / Remotion `4.0.545` dependency security upgrade (`0` prod `npm audit` CVEs), and automated/browser verification are complete and passing cleanly. Final go-live requires provisioning buyer cloud credentials (PostgreSQL, GCP Vertex AI + TTS, Stripe Live, SMTP).

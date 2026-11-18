@@ -2,9 +2,6 @@
 const nextConfig = {
   transpilePackages: ['@video-ad/remotion'],
   reactStrictMode: true,
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
   async headers() {
     return [
       {

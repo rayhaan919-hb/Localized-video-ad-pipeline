@@ -12,26 +12,26 @@
     "test": "tsc -p tsconfig.test.json && node --test .test-dist/apps/studio/src/__tests__/studio.test.js"
   },
   "dependencies": {
-    "@remotion/player": "4.0.242",
+    "@remotion/player": "4.0.545",
     "@supabase/ssr": "^0.5.2",
     "@supabase/supabase-js": "^2.47.10",
     "@video-ad/remotion": "*",
-    "lucide-react": "^0.468.0",
-    "next": "^14.2.35",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "remotion": "4.0.242"
+    "lucide-react": "^0.577.0",
+    "next": "^16.4.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "remotion": "4.0.545"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.0.9",
+    "@tailwindcss/postcss": "^4.3.5",
     "@types/node": "^20.17.10",
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@typescript-eslint/eslint-plugin": "^7.18.0",
     "@typescript-eslint/parser": "^7.18.0",
     "eslint": "^8.57.1",
-    "postcss": "^8.4.49",
-    "tailwindcss": "^4.0.9",
+    "postcss": "^8.5.33",
+    "tailwindcss": "^4.3.5",
     "typescript": "^5.6.3"
   }
 }

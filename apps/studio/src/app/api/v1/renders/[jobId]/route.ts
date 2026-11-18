@@ -2,16 +2,17 @@ import { NextResponse } from 'next/server';
 import { fetchWorker, workerUnavailableResponse } from '@/lib/serverStore';
 
 interface RouteContext {
-  params: {
+  params: Promise<{
     jobId: string;
-  };
+  }>;
 }
 
 export async function GET(
   request: Request,
   context: RouteContext
 ): Promise<NextResponse> {
-  const rawJobId = (context.params.jobId ?? '').replace(/\.mp4$/i, '').trim();
+  const { jobId } = await context.params;
+  const rawJobId = (jobId ?? '').replace(/\.mp4$/i, '').trim();
   if (!rawJobId) {
     return NextResponse.json({ detail: 'jobId is required.' }, { status: 400 });
   }

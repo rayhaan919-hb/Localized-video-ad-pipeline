@@ -50,10 +50,10 @@ This document details the security controls enforced across **Localized AI Video
 
 ---
 
-## 6. Known Upstream Dependency Advisories (Disclosed)
+## 6. Dependency Audit Status (`npm audit --omit=dev`)
 
-Running `npm audit --omit=dev` against `apps/studio` after patching `next` from `14.2.25` to `14.2.35` reports upstream advisories whose remediations require major-version upgrades outside the current React 18 / `@remotion/player@4.0.242` lock:
+Following the monorepo upgrade to `react@19.3.1`, `react-dom@19.3.1`, `next@16.4.6`, `postcss@8.5.33`, and `remotion@4.0.545` / `@remotion/player@4.0.545`:
 
-1. **`next@14.2.35` & nested `postcss`**: Advisories list fixes only in Next.js `16.x` (React 19 breaking upgrade). Mitigation notes: Studio enables zero Server Actions, configures no `next/image` `remotePatterns` image optimization proxy, uses App Router BFF handlers rather than middleware rewrites, and sits behind TLS reverse proxy controls; plan a dedicated React 19 + Next 15/16 + Remotion 4.0.410+ upgrade milestone prior to exposing self-hosted Next.js directly on Windows or untrusted public traffic.
-2. **`remotion@4.0.242` / `@remotion/player@4.0.242`**: Upstream audit lists advisories for `<=4.0.409` fixed in `>=4.0.410` (Studio currently runs only `@remotion/player` client-side composition preview with trusted props; server-side video compositing in `services/worker` uses direct validated FFmpeg subprocess arguments, not untrusted Remotion CLI server rendering).
-3. **`fast-xml-parser` / Python advisories**: Keep scheduled `pip-audit` and `npm audit` gates active in CI before production releases.
+- **Production Dependencies (`npm audit --omit=dev`):** **`found 0 vulnerabilities`** (0 critical, 0 high, 0 moderate, 0 low).
+- **Development Dependencies:** 6 moderate advisories remain on `minimatch` inside `@typescript-eslint` v7 lint tooling (not bundled into production runtime artifacts).
+- **Continuous Hygiene:** Keep scheduled `pip-audit` and `npm audit --omit=dev` checks active in CI prior to releases.

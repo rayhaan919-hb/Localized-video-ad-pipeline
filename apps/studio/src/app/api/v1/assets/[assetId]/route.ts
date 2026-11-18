@@ -2,16 +2,17 @@ import { NextResponse } from 'next/server';
 import { fetchWorker, workerUnavailableResponse } from '@/lib/serverStore';
 
 interface RouteContext {
-  params: {
+  params: Promise<{
     assetId: string;
-  };
+  }>;
 }
 
 export async function GET(
   request: Request,
   context: RouteContext
 ): Promise<NextResponse> {
-  const assetId = (context.params.assetId ?? '').trim();
+  const { assetId: rawAssetId } = await context.params;
+  const assetId = (rawAssetId ?? '').trim();
   if (!assetId) {
     return NextResponse.json(
       { detail: 'assetId is required.' },
