@@ -1,5 +1,9 @@
 import { NextResponse } from 'next/server';
-import { fetchWorker, workerUnavailableResponse } from '@/lib/serverStore';
+import {
+  fetchWorker,
+  isValidUuid,
+  workerUnavailableResponse,
+} from '@/lib/serverStore';
 
 interface RouteContext {
   params: Promise<{
@@ -7,15 +11,21 @@ interface RouteContext {
   }>;
 }
 
+const ALLOWED_ASSET_MIME = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+]);
+
 export async function GET(
   request: Request,
   context: RouteContext
 ): Promise<NextResponse> {
   const { assetId: rawAssetId } = await context.params;
   const assetId = (rawAssetId ?? '').trim();
-  if (!assetId) {
+  if (!assetId || !isValidUuid(assetId)) {
     return NextResponse.json(
-      { detail: 'assetId is required.' },
+      { detail: 'Valid UUID assetId is required.' },
       { status: 400 }
     );
   }
@@ -40,13 +50,27 @@ export async function GET(
     return NextResponse.json(payload, { status: workerRes.status });
   }
 
-  const arrayBuf = await workerRes.arrayBuffer();
-  return new NextResponse(arrayBuf, {
+  const rawType = (workerRes.headers.get('content-type') ?? '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+  const safeType = ALLOWED_ASSET_MIME.has(rawType)
+    ? rawType
+    : 'application/octet-stream';
+
+  const headers: Record<string, string> = {
+    'Content-Type': safeType,
+    'Cache-Control': 'private, max-age=300',
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "default-src 'none'; sandbox",
+  };
+  const contentLength = workerRes.headers.get('content-length');
+  if (contentLength) {
+    headers['Content-Length'] = contentLength;
+  }
+
+  return new NextResponse(workerRes.body, {
     status: 200,
-    headers: {
-      'Content-Type':
-        workerRes.headers.get('content-type') ?? 'application/octet-stream',
-      'Cache-Control': 'private, max-age=300',
-    },
+    headers,
   });
 }

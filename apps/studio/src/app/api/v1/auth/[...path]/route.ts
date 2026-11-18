@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 import {
+  assertSameOriginRequest,
   fetchWorker,
   forwardWorkerJsonResponse,
+  stripAuthTokensFromPayload,
   workerUnavailableResponse,
 } from '@/lib/serverStore';
 
@@ -49,6 +51,11 @@ export async function POST(
   request: Request,
   context: RouteContext
 ): Promise<NextResponse> {
+  const csrfErr = assertSameOriginRequest(request);
+  if (csrfErr) {
+    return csrfErr;
+  }
+
   const { path } = await context.params;
   const joined = resolveAuthPath(path);
   if (!ALLOWED_POST_PATHS.has(joined)) {
@@ -64,5 +71,8 @@ export async function POST(
   if (!workerRes) {
     return workerUnavailableResponse();
   }
-  return forwardWorkerJsonResponse(workerRes, { forwardCookies: true });
+  return forwardWorkerJsonResponse(workerRes, {
+    forwardCookies: true,
+    transformPayload: stripAuthTokensFromPayload,
+  });
 }

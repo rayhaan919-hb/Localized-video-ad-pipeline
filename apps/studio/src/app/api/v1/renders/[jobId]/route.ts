@@ -1,5 +1,9 @@
 import { NextResponse } from 'next/server';
-import { fetchWorker, workerUnavailableResponse } from '@/lib/serverStore';
+import {
+  fetchWorker,
+  isValidUuid,
+  workerUnavailableResponse,
+} from '@/lib/serverStore';
 
 interface RouteContext {
   params: Promise<{
@@ -13,8 +17,11 @@ export async function GET(
 ): Promise<NextResponse> {
   const { jobId } = await context.params;
   const rawJobId = (jobId ?? '').replace(/\.mp4$/i, '').trim();
-  if (!rawJobId) {
-    return NextResponse.json({ detail: 'jobId is required.' }, { status: 400 });
+  if (!rawJobId || !isValidUuid(rawJobId)) {
+    return NextResponse.json(
+      { detail: 'Valid UUID jobId is required.' },
+      { status: 400 }
+    );
   }
 
   const { searchParams } = new URL(request.url);
@@ -44,13 +51,19 @@ export async function GET(
     return NextResponse.json(payload, { status: workerRes.status });
   }
 
-  const arrayBuf = await workerRes.arrayBuffer();
-  return new NextResponse(arrayBuf, {
+  const headers: Record<string, string> = {
+    'Content-Type': 'video/mp4',
+    'Content-Disposition': `attachment; filename="localized-ad-${rawJobId.slice(0, 8)}.mp4"`,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  };
+  const contentLength = workerRes.headers.get('content-length');
+  if (contentLength) {
+    headers['Content-Length'] = contentLength;
+  }
+
+  return new NextResponse(workerRes.body, {
     status: 200,
-    headers: {
-      'Content-Type': 'video/mp4',
-      'Content-Disposition': `attachment; filename="localized-ad-${rawJobId.slice(0, 8)}.mp4"`,
-      'Cache-Control': 'no-store',
-    },
+    headers,
   });
 }

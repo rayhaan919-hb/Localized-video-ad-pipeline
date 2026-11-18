@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 import {
+  assertSameOriginRequest,
   fetchWorker,
   forwardWorkerJsonResponse,
+  isValidUuid,
   workerUnavailableResponse,
 } from '@/lib/serverStore';
 
@@ -15,11 +17,16 @@ export async function POST(
   request: Request,
   context: RouteContext
 ): Promise<NextResponse> {
+  const csrfErr = assertSameOriginRequest(request);
+  if (csrfErr) {
+    return csrfErr;
+  }
+
   const { id } = await context.params;
   const workspaceId = (id ?? '').trim();
-  if (!workspaceId) {
+  if (!workspaceId || !isValidUuid(workspaceId)) {
     return NextResponse.json(
-      { detail: 'workspace id is required.' },
+      { detail: 'Valid UUID workspace id is required.' },
       { status: 400 }
     );
   }

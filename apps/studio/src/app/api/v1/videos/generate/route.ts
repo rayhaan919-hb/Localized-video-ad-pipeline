@@ -6,8 +6,10 @@ import type {
 } from '@video-ad/remotion';
 import { AD_ANGLES, SUPPORTED_LANGUAGES } from '@/lib/adPresetsServer';
 import {
+  assertSameOriginRequest,
   fetchWorker,
   forwardWorkerJsonResponse,
+  isValidUuid,
   normalizeVideoJob,
   workerUnavailableResponse,
 } from '@/lib/serverStore';
@@ -45,6 +47,11 @@ function isAdAngle(val: string): val is AdAngle {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
+  const csrfErr = assertSameOriginRequest(request);
+  if (csrfErr) {
+    return csrfErr;
+  }
+
   let body: GenerateRequestBody;
   try {
     body = (await request.json()) as GenerateRequestBody;
@@ -56,9 +63,9 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   const workspaceId = (body.workspace_id ?? '').trim();
-  if (!workspaceId) {
+  if (!workspaceId || !isValidUuid(workspaceId)) {
     return NextResponse.json(
-      { detail: 'Authenticated workspace_id is required.' },
+      { detail: 'Valid UUID workspace_id is required.' },
       { status: 422 }
     );
   }

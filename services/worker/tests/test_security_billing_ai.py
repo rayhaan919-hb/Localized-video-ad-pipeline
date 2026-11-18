@@ -993,3 +993,71 @@ def test_production_guards_video_limit_ssrf_and_stale_recovery(
 
     assert recover_interrupted_jobs(min_age_seconds=900) == 0
     assert recover_interrupted_jobs(min_age_seconds=0) == 1
+
+
+def test_rate_limiter_eviction_member_limits_and_multipart_sanitization(
+    client: TestClient,
+) -> None:
+    """Verify bounded rate-limiter eviction, member throttling, and multipart safety."""
+    from app.security import SlidingWindowRateLimiter
+
+    bounded = SlidingWindowRateLimiter(max_keys=5)
+    for idx in range(12):
+        allowed, _ = bounded.check("ip", f"198.51.100.{idx}", limit=5, window_seconds=60)
+        assert allowed is True
+    assert len(bounded._events) <= 5
+
+    reg = _register(client, "audit-hardening@example.com")
+    headers = {"Authorization": f"Bearer {reg['access_token']}"}
+    ws_id = reg["primary_workspace_id"]
+
+    # Member invite route must throttle repeated probes cleanly at 20 req/min
+    rate_limiter.reset("member_invite")
+    for _ in range(20):
+        res = client.post(
+            f"/v1/workspaces/{ws_id}/members",
+            headers=headers,
+            json={"email": "missing-user@example.com", "role": "member"},
+        )
+        assert res.status_code == 404
+    throttled = client.post(
+        f"/v1/workspaces/{ws_id}/members",
+        headers=headers,
+        json={"email": "missing-user@example.com", "role": "member"},
+    )
+    assert throttled.status_code == 429
+    assert "Retry-After" in throttled.headers
+
+    # CRLF + non-latin-1 characters in multipart Content-Type must not raise UnicodeEncodeError
+    from app.main import _extract_uploaded_asset_payload
+
+    with pytest.raises(ValueError):
+        _extract_uploaded_asset_payload(
+            "multipart/form-data; boundary=test\r\nX-Evil: caf\u00e9-\u2603",
+            b"--test--\r\n",
+        )
+
+    bad_upload = client.post(
+        f"/v1/workspaces/{ws_id}/assets",
+        headers={**headers, "Content-Type": "multipart/form-data; boundary=test"},
+        content=b"--test--",
+    )
+    assert bad_upload.status_code == 400
+
+    # list_workspace_assets caps output at 100 items
+    tiny_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    with db_module.SessionLocal() as session:
+        for i in range(105):
+            register_workspace_file(
+                session,
+                workspace_id=ws_id,
+                user_id=reg["user"]["id"],
+                asset_kind="product_image",
+                filename=f"item-{i}.png",
+                content_type="image/png",
+                data=tiny_png,
+            )
+        session.commit()
+    listed = client.get(f"/v1/workspaces/{ws_id}/assets", headers=headers)
+    assert listed.status_code == 200
+    assert len(listed.json()["assets"]) == 100

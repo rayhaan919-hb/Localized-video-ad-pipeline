@@ -5,7 +5,11 @@ import {
   SUPPORTED_LANGUAGES,
   getServerPresetAdProps,
 } from '@/lib/adPresetsServer';
-import { fetchWorker, workerUnavailableResponse } from '@/lib/serverStore';
+import {
+  assertSameOriginRequest,
+  fetchWorker,
+  workerUnavailableResponse,
+} from '@/lib/serverStore';
 import type { ScrapedProductMetadata } from '@/types/studio';
 
 interface ScrapeBody {
@@ -23,6 +27,11 @@ function isAdAngle(val: string): val is AdAngle {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
+  const csrfErr = assertSameOriginRequest(request);
+  if (csrfErr) {
+    return csrfErr;
+  }
+
   let body: ScrapeBody;
   try {
     body = (await request.json()) as ScrapeBody;

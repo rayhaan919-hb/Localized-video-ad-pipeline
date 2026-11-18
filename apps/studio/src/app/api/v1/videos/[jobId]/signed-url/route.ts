@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import {
   fetchWorker,
   forwardWorkerJsonResponse,
+  isValidUuid,
   workerUnavailableResponse,
 } from '@/lib/serverStore';
 
@@ -17,8 +18,11 @@ export async function GET(
 ): Promise<NextResponse> {
   const { jobId: rawJobId } = await context.params;
   const jobId = (rawJobId ?? '').trim();
-  if (!jobId) {
-    return NextResponse.json({ detail: 'jobId is required.' }, { status: 400 });
+  if (!jobId || !isValidUuid(jobId)) {
+    return NextResponse.json(
+      { detail: 'Valid UUID jobId is required.' },
+      { status: 400 }
+    );
   }
 
   const workerRes = await fetchWorker(

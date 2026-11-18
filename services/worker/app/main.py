@@ -580,9 +580,11 @@ def list_workspaces(
 @app.post("/v1/workspaces", status_code=status.HTTP_201_CREATED)
 def create_workspace(
     payload: WorkspaceCreateRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    _enforce_rate_limit(request, "workspace_create", current_user.id, 20)
     ws = create_workspace_for_user(
         db,
         owner_id=current_user.id,
@@ -673,9 +675,11 @@ def get_workspace(
 def add_workspace_member(
     workspace_id: uuid.UUID,
     payload: AddMemberRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    _enforce_rate_limit(request, "member_invite", current_user.id, 20)
     required_role = "owner" if payload.role == "admin" else "admin"
     ws, _ = require_workspace_role(
         db,
@@ -929,8 +933,12 @@ def _extract_uploaded_asset_payload(
 ) -> tuple[str, bytes]:
     ct = (content_type or "").lower()
     if "multipart/form-data" in ct:
+        safe_ct = (content_type or "").replace("\r", " ").replace("\n", " ").strip()
         mime_msg = BytesParser(policy=email_default_policy).parsebytes(
-            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("latin-1") + body
+            f"Content-Type: {safe_ct}\r\nMIME-Version: 1.0\r\n\r\n".encode(
+                "latin-1", errors="ignore"
+            )
+            + body
         )
         if mime_msg.is_multipart():
             for part in mime_msg.iter_parts():
@@ -958,6 +966,7 @@ async def upload_workspace_asset(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    _enforce_rate_limit(request, "asset_upload", current_user.id, 30)
     ws, _ = require_workspace_role(
         db,
         workspace_id=str(workspace_id),
@@ -1015,6 +1024,7 @@ def list_workspace_assets(
             select(WorkspaceAsset)
             .where(WorkspaceAsset.workspace_id == ws.id)
             .order_by(WorkspaceAsset.created_at.desc())
+            .limit(100)
         ).all()
     )
     return {

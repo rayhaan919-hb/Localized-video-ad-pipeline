@@ -2,7 +2,115 @@ import { NextResponse } from 'next/server';
 import type { VideoJobRecord } from '@/types/studio';
 
 const ACCESS_COOKIE_NAME = 'lva_access_token';
+const REFRESH_COOKIE_NAME = 'lva_refresh_token';
 const DEFAULT_WORKER_TIMEOUT_MS = 10000;
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidUuid(value: string): boolean {
+  return UUID_RE.test(value.trim());
+}
+
+export function stripAuthTokensFromPayload(payload: unknown): unknown {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return payload;
+  }
+  const rest = { ...(payload as Record<string, unknown>) };
+  delete rest.access_token;
+  delete rest.refresh_token;
+  return rest;
+}
+
+function collectAllowedOrigins(request: Request): Set<string> {
+  const allowed = new Set<string>();
+  try {
+    allowed.add(new URL(request.url).origin);
+  } catch {
+    // ignore invalid synthetic request URL
+  }
+  const host = request.headers.get('host')?.trim();
+  if (host) {
+    allowed.add(`http://${host}`);
+    allowed.add(`https://${host}`);
+  }
+  const forwardedHost = request.headers
+    .get('x-forwarded-host')
+    ?.split(',')[0]
+    ?.trim();
+  if (forwardedHost) {
+    allowed.add(`http://${forwardedHost}`);
+    allowed.add(`https://${forwardedHost}`);
+  }
+  for (const envUrl of [
+    process.env.FRONTEND_APP_URL,
+    process.env.NEXT_PUBLIC_APP_URL,
+  ]) {
+    if (envUrl?.trim()) {
+      try {
+        allowed.add(new URL(envUrl.trim()).origin);
+      } catch {
+        // ignore invalid env URL
+      }
+    }
+  }
+  return allowed;
+}
+
+export function assertSameOriginRequest(request: Request): NextResponse | null {
+  const secFetchSite = request.headers.get('sec-fetch-site')?.trim().toLowerCase();
+  if (secFetchSite === 'cross-site') {
+    return NextResponse.json(
+      { detail: 'Cross-site request blocked.' },
+      { status: 403 }
+    );
+  }
+
+  const allowed = collectAllowedOrigins(request);
+  const origin = request.headers.get('origin')?.trim();
+  if (origin !== undefined && origin !== '') {
+    if (origin === 'null' || !allowed.has(origin)) {
+      return NextResponse.json(
+        { detail: 'Cross-origin request blocked.' },
+        { status: 403 }
+      );
+    }
+    return null;
+  }
+
+  const referer = request.headers.get('referer')?.trim();
+  if (referer) {
+    try {
+      const refOrigin = new URL(referer).origin;
+      if (!allowed.has(refOrigin)) {
+        return NextResponse.json(
+          { detail: 'Cross-origin referer blocked.' },
+          { status: 403 }
+        );
+      }
+      return null;
+    } catch {
+      return NextResponse.json(
+        { detail: 'Invalid referer header.' },
+        { status: 403 }
+      );
+    }
+  }
+
+  const cookieHeader = request.headers.get('cookie') ?? '';
+  const hasSessionCookie =
+    cookieHeader.includes(`${ACCESS_COOKIE_NAME}=`) ||
+    cookieHeader.includes(`${REFRESH_COOKIE_NAME}=`);
+  const hasAuthHeader = Boolean(request.headers.get('authorization')?.trim());
+
+  if (hasSessionCookie && !hasAuthHeader) {
+    return NextResponse.json(
+      { detail: 'Origin header is required for cookie-authenticated mutations.' },
+      { status: 403 }
+    );
+  }
+
+  return null;
+}
 
 export function getWorkerBaseUrl(): string {
   const configured =

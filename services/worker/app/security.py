@@ -95,11 +95,24 @@ def log_audit_event(
 
 
 class SlidingWindowRateLimiter:
-    """Thread-safe in-memory sliding-window rate limiter keyed by bucket + subject."""
+    """Thread-safe in-memory sliding-window rate limiter with bounded key eviction."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_keys: int = 10_000) -> None:
         self._lock = threading.Lock()
+        self._max_keys = max(1, int(max_keys))
+        self._last_sweep = time.monotonic()
         self._events: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+
+    def _sweep_stale_locked(self, now: float, cutoff: float) -> None:
+        expired_keys: list[tuple[str, str]] = []
+        for k, q in self._events.items():
+            while q and q[0] <= cutoff:
+                q.popleft()
+            if not q:
+                expired_keys.append(k)
+        for k in expired_keys:
+            del self._events[k]
+        self._last_sweep = now
 
     def check(
         self,
@@ -115,6 +128,21 @@ class SlidingWindowRateLimiter:
         cutoff = now - float(window_seconds)
         composite = (bucket, key)
         with self._lock:
+            if (
+                len(self._events) > 512
+                or (now - self._last_sweep) >= 60.0
+                or len(self._events) >= self._max_keys
+            ):
+                self._sweep_stale_locked(now, cutoff)
+
+            if composite not in self._events and len(self._events) >= self._max_keys:
+                # Evict bucket with oldest leading timestamp to keep memory strictly bounded.
+                oldest_key = min(
+                    self._events.items(),
+                    key=lambda item: item[1][0] if item[1] else float("-inf"),
+                )[0]
+                del self._events[oldest_key]
+
             queue = self._events[composite]
             while queue and queue[0] <= cutoff:
                 queue.popleft()
