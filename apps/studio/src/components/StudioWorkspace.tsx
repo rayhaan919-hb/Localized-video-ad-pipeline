@@ -897,11 +897,6 @@ export const StudioWorkspace: React.FC = () => {
     [jobs, activeJobId]
   );
 
-  const completedJobsCount = useMemo(
-    () => jobs.filter((item) => item.status === 'COMPLETED').length,
-    [jobs]
-  );
-
   const liveAdProps: LocalizedAdProps = useMemo(() => {
     const resolvedImage = selectedAssetId
       ? `/api/v1/assets/${encodeURIComponent(selectedAssetId)}`
@@ -940,18 +935,12 @@ export const StudioWorkspace: React.FC = () => {
     captions,
   ]);
 
-  const canDispatchRender =
-    Boolean(user) &&
-    Boolean(workspaceId) &&
-    Boolean(productTitle.trim()) &&
-    Boolean(brandName.trim()) &&
-    Boolean(priceDisplay.trim()) &&
-    fieldsConfirmed &&
-    creditBalance >= 1 &&
-    !isGenerating;
-
   return (
-    <div className="min-h-screen bg-[#09090B] text-[#FAFAFA]">
+    <div className="min-h-screen bg-[#FAF7F2] text-[#1C1917]">
+      <a href="#studio-main" className="skip-link">
+        Skip to studio workspace
+      </a>
+
       <StudioHeader
         user={user}
         workspaces={workspaces}
@@ -965,8 +954,6 @@ export const StudioWorkspace: React.FC = () => {
         onLogout={handleLogout}
         creditBalance={creditBalance}
         isLoadingCredits={isLoadingCredits}
-        totalJobsCount={jobs.length}
-        completedJobsCount={completedJobsCount}
         viewStateMode={viewStateMode}
         onChangeViewStateMode={setViewStateMode}
         onOpenCreditModal={() => setIsCreditModalOpen(true)}
@@ -977,16 +964,19 @@ export const StudioWorkspace: React.FC = () => {
         }}
       />
 
-      <main className="mx-auto flex max-w-[1200px] flex-col gap-6 px-6 py-6">
+      <main
+        id="studio-main"
+        tabIndex={-1}
+        className="mx-auto flex max-w-[1200px] flex-col gap-6 px-4 py-5 outline-none sm:px-6 sm:py-6"
+      >
         {/* Auth Required Gate Banner when dismissed modal */}
         {!isAuthChecking && !user ? (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-amber-500/60 bg-[#18181B] px-4 py-3 text-xs">
-            <div className="flex items-center gap-2">
-              <ShieldAlert className="h-4 w-4 text-amber-400" />
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#FDE68A] bg-[#FFFBEB] px-4 py-3 text-xs text-[#1C1917] shadow-[0_1px_2px_rgba(28,25,23,0.03)]">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <ShieldAlert className="h-4 w-4 shrink-0 text-[#92400E]" />
               <span>
-                Sign in or register an account to access isolated workspaces,
-                SSRF-guarded product scraping, Stripe credit checkout, and
-                real MP4 rendering.
+                Sign in or create an account to access your workspaces, import
+                products, buy credits, and render videos.
               </span>
             </div>
             <button
@@ -995,7 +985,7 @@ export const StudioWorkspace: React.FC = () => {
                 setAuthModalMode('login');
                 setIsAuthModalOpen(true);
               }}
-              className="rounded border border-[#6366F1] bg-[#6366F1] px-3 py-1.5 font-semibold text-[#FAFAFA]"
+              className="min-h-[38px] rounded-full bg-[#15803D] px-4 py-1.5 font-semibold text-white transition-colors hover:bg-[#166534]"
             >
               Sign In / Create Account
             </button>
@@ -1003,19 +993,25 @@ export const StudioWorkspace: React.FC = () => {
         ) : null}
 
         {bannerMessage ? (
-          <div className="flex items-center justify-between rounded border border-[#6366F1] bg-[#18181B] px-4 py-2 text-xs text-[#FAFAFA]">
-            <span className="font-mono-code tabular-nums">{bannerMessage}</span>
+          <div
+            role="status"
+            aria-live="polite"
+            className="flex items-center justify-between gap-3 rounded-2xl border border-[#BBF7D0] bg-[#F0FDF4] px-4 py-2.5 text-xs text-[#1C1917]"
+          >
+            <span className="min-w-0 break-words tabular-nums">
+              {bannerMessage}
+            </span>
             <button
               type="button"
               onClick={() => setBannerMessage(null)}
-              className="text-xs text-[#A1A1AA] hover:text-[#FAFAFA]"
+              className="min-h-[32px] shrink-0 rounded-full px-3 text-xs font-semibold text-[#166534] hover:bg-[#DCFCE7]"
             >
               Dismiss
             </button>
           </div>
         ) : null}
 
-        <div className="flex flex-col items-stretch gap-6 lg:flex-row">
+        <div className="flex flex-col items-stretch gap-6 lg:flex-row lg:items-start">
           <ProductScraperPanel
             productUrl={productUrl}
             onChangeProductUrl={setProductUrl}
@@ -1079,11 +1075,7 @@ export const StudioWorkspace: React.FC = () => {
             adProps={liveAdProps}
             activeJob={activeJob}
             aspectRatio={aspectRatio}
-            canGenerate={canDispatchRender}
             viewStateMode={viewStateMode}
-            onGenerateVideo={() => {
-              void handleGenerateVideo();
-            }}
           />
         </div>
 
@@ -1121,7 +1113,6 @@ export const StudioWorkspace: React.FC = () => {
       <CreditCheckoutModal
         isOpen={isCreditModalOpen}
         onClose={() => setIsCreditModalOpen(false)}
-        workspaceId={workspaceId || 'UNAUTHENTICATED'}
         creditBalance={creditBalance}
         ledger={ledger}
         isLoadingCredits={isLoadingCredits}

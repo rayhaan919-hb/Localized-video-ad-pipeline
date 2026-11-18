@@ -4,9 +4,9 @@ import { GOOGLE_FONTS_STYLESHEET_URL } from '@/lib/adPresetsServer';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Veo 3.1 · Localized AI Video Ad Studio (Non-English D2C)',
+  title: 'Localized Video Ad Studio',
   description:
-    'Dark-mode creator studio for non-English D2C video ads (Urdu Nastaliq RTL, Arabic RTL, Hindi Devanagari, English) powered by Vertex AI Veo 3.1, Remotion, and Supabase Credit Ledger.',
+    'Warm creator studio for localized D2C video ads (Urdu Nastaliq RTL, Arabic RTL, Hindi Devanagari, English) powered by Remotion.',
 };
 
 export default function RootLayout({
@@ -15,7 +15,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>): React.ReactElement {
   return (
-    <html lang="en" className="dark">
+    <html lang="en">
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link
@@ -25,7 +25,7 @@ export default function RootLayout({
         />
         <link rel="stylesheet" href={GOOGLE_FONTS_STYLESHEET_URL} />
       </head>
-      <body className="bg-[#09090B] text-[#FAFAFA] antialiased">
+      <body className="bg-[#FAF7F2] text-[#1C1917] antialiased">
         {children}
       </body>
     </html>

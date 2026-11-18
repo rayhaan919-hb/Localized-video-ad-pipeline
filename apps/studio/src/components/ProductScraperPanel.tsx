@@ -1,17 +1,13 @@
 'use client';
 
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   AlertTriangle,
-  CheckCircle2,
-  Globe,
+  ChevronDown,
   ImagePlus,
-  Link2,
   PackageSearch,
   RotateCcw,
   Sparkles,
-  Tag,
-  Type,
   Wand2,
 } from 'lucide-react';
 import {
@@ -89,11 +85,11 @@ const SAMPLE_STORE_URLS = [
   },
 ];
 
-const ANGLE_UI_LABELS: Record<AdAngle, { title: string; tag: string }> = {
-  problem_solution: { title: 'Problem → Solution', tag: 'PAIN + FIX' },
-  ugc_testimonial: { title: 'UGC Review', tag: 'SOCIAL PROOF' },
-  flash_sale: { title: 'Flash Sale Offer', tag: 'URGENCY' },
-  unboxing: { title: 'Unboxing Reveal', tag: 'FIRST LOOK' },
+const ANGLE_UI_LABELS: Record<AdAngle, string> = {
+  problem_solution: 'Problem → Solution',
+  ugc_testimonial: 'UGC Review',
+  flash_sale: 'Flash Sale',
+  unboxing: 'Unboxing',
 };
 
 export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
@@ -149,6 +145,21 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
   viewStateMode,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+  const [showScriptEditor, setShowScriptEditor] = useState(false);
+
+  const markTouched = (field: string) =>
+    setTouched((prev) => ({ ...prev, [field]: true }));
+
+  const urlInvalid = Boolean(
+    touched.productUrl &&
+      productUrl.trim() &&
+      !/^https?:\/\/.+/i.test(productUrl.trim())
+  );
+  const brandInvalid = Boolean(touched.brandName && !brandName.trim());
+  const priceInvalid = Boolean(touched.priceDisplay && !priceDisplay.trim());
+  const titleInvalid = Boolean(touched.productTitle && !productTitle.trim());
+
   const fontMeta = LANGUAGE_FONT_METADATA[targetLanguage];
   const showSkeleton = isScraping || viewStateMode === 'loading';
   const showError = Boolean(scrapeError) || viewStateMode === 'error';
@@ -179,40 +190,32 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
 
   return (
     <aside
-      aria-label="Product URL Scraper and Localized Script Controls"
-      className="w-full shrink-0 rounded border border-[#27272A] bg-[#18181B] p-4 lg:w-[360px]"
+      aria-label="Create Video Ad Controls"
+      className="w-full min-w-0 shrink-0 rounded-2xl border border-[#E6E0D5] bg-white p-5 shadow-[0_1px_2px_rgba(28,25,23,0.04)] lg:w-[372px]"
     >
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-5">
         {/* Panel Title Row */}
-        <div className="flex items-center justify-between border-b border-[#27272A] pb-3">
-          <div className="flex items-center gap-2">
-            <Link2 className="h-4 w-4 text-[#6366F1]" />
-            <h2 className="text-sm font-semibold text-[#FAFAFA]">
-              1. Product & Localization
-            </h2>
-          </div>
-          <span className="font-mono-code tabular-nums rounded border border-[#27272A] bg-[#09090B] px-2 py-0.5 text-[11px] text-[#A1A1AA]">
-            {aspectRatio}
-          </span>
+        <div className="flex items-center justify-between border-b border-[#E6E0D5] pb-3.5">
+          <h2 className="text-base font-semibold text-[#1C1917]">
+            Create Video Ad
+          </h2>
+          <button
+            type="button"
+            onClick={onClearProduct}
+            className="min-h-[32px] rounded-full px-3 text-xs font-medium text-[#57534E] transition-colors hover:bg-[#F4EFE6] hover:text-[#1C1917]"
+          >
+            Clear
+          </button>
         </div>
 
         {/* Product URL Input & Scraper Trigger */}
         <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <label
-              htmlFor="product-url-input"
-              className="text-xs font-medium text-[#FAFAFA]"
-            >
-              D2C Product URL (SSRF-Guarded Live Fetch)
-            </label>
-            <button
-              type="button"
-              onClick={onClearProduct}
-              className="text-[11px] text-[#A1A1AA] underline-offset-2 hover:text-[#FAFAFA] hover:underline"
-            >
-              Clear fields
-            </button>
-          </div>
+          <label
+            htmlFor="product-url-input"
+            className="text-xs font-medium text-[#1C1917]"
+          >
+            Product Storefront URL
+          </label>
 
           <div className="flex gap-2">
             <input
@@ -220,26 +223,43 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
               type="url"
               value={productUrl}
               onChange={(e) => onChangeProductUrl(e.target.value)}
+              onBlur={() => markTouched('productUrl')}
+              aria-invalid={urlInvalid}
+              aria-describedby={urlInvalid ? 'product-url-error' : undefined}
               placeholder="https://yourstore.com/products/serum"
-              className="font-mono-code min-w-0 flex-1 rounded border border-[#27272A] bg-[#09090B] px-3 py-2 text-xs text-[#FAFAFA] placeholder-[#A1A1AA]/50 focus:border-[#6366F1] focus:outline-none"
+              className={`min-h-[40px] min-w-0 flex-1 rounded-xl border bg-[#FAF7F2] px-3.5 py-2 text-xs text-[#1C1917] placeholder-[#6E6A63] focus:bg-white focus:outline-none ${
+                urlInvalid
+                  ? 'border-[#B91C1C]'
+                  : 'border-[#D6CEC0] focus:border-[#15803D]'
+              }`}
             />
             <button
               type="button"
               onClick={() => onScrapeUrl()}
               disabled={isScraping || !isAuthenticated}
-              className="shrink-0 rounded border border-[#6366F1] bg-[#6366F1] px-3 py-2 text-xs font-semibold text-[#FAFAFA] transition-colors hover:bg-[#5254E8] disabled:opacity-50"
+              className="min-h-[40px] shrink-0 rounded-full bg-[#15803D] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#166534] disabled:opacity-50"
             >
-              {isScraping ? 'Fetching…' : 'Fetch URL'}
+              {isScraping ? 'Fetching…' : 'Fetch'}
             </button>
           </div>
 
-          <div className="flex flex-wrap gap-1 pt-0.5">
+          {urlInvalid ? (
+            <p
+              id="product-url-error"
+              role="alert"
+              className="text-[11px] font-medium text-[#B91C1C]"
+            >
+              Enter a URL starting with https:// or http://
+            </p>
+          ) : null}
+
+          <div className="flex flex-wrap gap-1.5">
             {SAMPLE_STORE_URLS.map((sample) => (
               <button
                 key={sample.id}
                 type="button"
                 onClick={() => onChangeProductUrl(sample.url)}
-                className="rounded border border-[#27272A] bg-[#09090B] px-2 py-0.5 text-[10px] text-[#A1A1AA] hover:border-[#6366F1] hover:text-[#FAFAFA]"
+                className="min-h-[30px] rounded-full bg-[#F4EFE6] px-3 py-1 text-[11px] font-medium text-[#57534E] transition-colors hover:bg-[#E6E0D5] hover:text-[#1C1917]"
               >
                 Use {sample.label}
               </button>
@@ -247,32 +267,27 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
           </div>
         </div>
 
-        {/* Honest Extraction Telemetry Banner */}
+        {/* Scrape Telemetry Banner */}
         {scrapeMetadata ? (
-          <div className="flex flex-col gap-1.5 rounded border border-[#27272A] bg-[#09090B] p-2.5 text-[11px]">
-            <div className="flex items-center justify-between">
-              <span className="font-mono-code font-semibold text-[#FAFAFA]">
-                SCRAPE STATUS: {(scrapeMetadata.scrape_status ?? 'ok').toUpperCase()}
+          <div className="flex flex-col gap-1 rounded-xl border border-[#E6E0D5] bg-[#FAF7F2] p-3 text-xs">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold text-[#1C1917]">
+                Storefront Import
               </span>
               {scrapeMetadata.requires_user_confirmation ? (
-                <span className="font-mono-code text-amber-400">
-                  CONFIRM REQUIRED
+                <span className="rounded-full border border-[#FDE68A] bg-[#FFFBEB] px-2.5 py-0.5 text-[10px] font-semibold text-[#92400E]">
+                  Review fields
                 </span>
               ) : (
-                <span className="font-mono-code text-emerald-400">VERIFIED</span>
+                <span className="rounded-full border border-[#BBF7D0] bg-[#F0FDF4] px-2.5 py-0.5 text-[10px] font-semibold text-[#166534]">
+                  Verified
+                </span>
               )}
             </div>
-            {scrapeMetadata.verified_fields &&
-            scrapeMetadata.verified_fields.length > 0 ? (
-              <p className="text-[#A1A1AA]">
-                Verified: {scrapeMetadata.verified_fields.join(', ')}
-              </p>
-            ) : null}
             {scrapeMetadata.missing_fields &&
             scrapeMetadata.missing_fields.length > 0 ? (
-              <p className="text-amber-300">
-                Missing / unverified:{' '}
-                {scrapeMetadata.missing_fields.join(', ')} — enter exact store values below.
+              <p className="text-[11px] text-[#92400E]">
+                Check missing fields: {scrapeMetadata.missing_fields.join(', ')}
               </p>
             ) : null}
           </div>
@@ -282,17 +297,17 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
         {showError ? (
           <div
             role="alert"
-            className="flex flex-col gap-2 rounded border border-red-500/60 bg-[#09090B] p-3"
+            className="flex flex-col gap-2 rounded-xl border border-[#FECACA] bg-[#FEF2F2] p-3"
           >
             <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
-              <div className="flex-1">
-                <p className="text-xs font-semibold text-[#FAFAFA]">
-                  Product Metadata Extraction Failed
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#B91C1C]" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-semibold text-[#B91C1C]">
+                  Couldn&apos;t import that URL
                 </p>
-                <p className="mt-0.5 text-xs text-[#A1A1AA]">
+                <p className="mt-0.5 text-xs text-[#57534E]">
                   {scrapeError ??
-                    'Remote storefront failed to respond with verified OpenGraph/JSON-LD metadata.'}
+                    'Enter your product details manually below or try another storefront URL.'}
                 </p>
               </div>
             </div>
@@ -300,80 +315,67 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
               <button
                 type="button"
                 onClick={() => onScrapeUrl()}
-                className="flex items-center gap-1.5 rounded border border-[#27272A] bg-[#18181B] px-3 py-1 text-xs font-semibold text-[#FAFAFA] hover:border-[#6366F1]"
+                className="flex min-h-[32px] items-center gap-1.5 rounded-full border border-[#FECACA] bg-white px-3 py-1 text-xs font-semibold text-[#1C1917] hover:border-[#15803D] hover:text-[#166534]"
               >
-                <RotateCcw className="h-3 w-3 text-[#6366F1]" />
+                <RotateCcw className="h-3 w-3 text-[#166534]" />
                 <span>Retry</span>
               </button>
             </div>
           </div>
         ) : null}
 
-        {/* Target Language Selector */}
-        <div className="flex flex-col gap-2 border-t border-[#27272A] pt-3">
-          <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5 text-xs font-medium text-[#FAFAFA]">
-              <Globe className="h-3.5 w-3.5 text-[#6366F1]" />
-              <span>Target Language</span>
+        {/* Language, Format, Duration & Ad Style */}
+        <div className="flex flex-col gap-3.5 border-t border-[#E6E0D5] pt-4">
+          <div className="flex flex-col gap-2">
+            <span className="text-xs font-medium text-[#1C1917]">
+              Target Language
             </span>
-            <span className="font-mono-code tabular-nums rounded border border-[#27272A] bg-[#09090B] px-2 py-0.5 text-[11px] text-[#A1A1AA]">
-              {fontMeta.dir.toUpperCase()} · {fontMeta.fontFamily}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            {SUPPORTED_LANGUAGES.map((lang) => {
-              const meta = LANGUAGE_FONT_METADATA[lang];
-              const active = targetLanguage === lang;
-              return (
-                <button
-                  key={lang}
-                  type="button"
-                  onClick={() => onChangeLanguage(lang)}
-                  className={`flex flex-col items-start justify-between rounded border p-2.5 text-left transition-colors ${
-                    active
-                      ? 'border-[#6366F1] bg-[#09090B] text-[#FAFAFA]'
-                      : 'border-[#27272A] bg-[#09090B] text-[#A1A1AA] hover:border-[#FAFAFA]/40 hover:text-[#FAFAFA]'
-                  }`}
-                >
-                  <div className="flex w-full items-center justify-between">
-                    <span className="text-xs font-semibold text-[#FAFAFA]">
+            <div className="grid grid-cols-2 gap-2">
+              {SUPPORTED_LANGUAGES.map((lang) => {
+                const meta = LANGUAGE_FONT_METADATA[lang];
+                const active = targetLanguage === lang;
+                return (
+                  <button
+                    key={lang}
+                    type="button"
+                    onClick={() => onChangeLanguage(lang)}
+                    className={`flex min-h-[42px] items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left transition-colors ${
+                      active
+                        ? 'border-[#15803D] bg-[#F0FDF4] text-[#166534]'
+                        : 'border-[#E6E0D5] bg-[#FAF7F2] text-[#1C1917] hover:border-[#D6CEC0]'
+                    }`}
+                  >
+                    <span className="text-xs font-semibold">
                       {meta.nativeLabel}
                     </span>
                     <span
-                      className={`font-mono-code rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                      className={`font-mono-code rounded-full px-2 py-0.5 text-[10px] font-semibold ${
                         active
-                          ? 'bg-[#6366F1] text-[#FAFAFA]'
-                          : 'border border-[#27272A] text-[#A1A1AA]'
+                          ? 'bg-[#15803D] text-white'
+                          : 'bg-white text-[#57534E]'
                       }`}
                     >
-                      {lang.toUpperCase()} · {meta.dir.toUpperCase()}
+                      {lang.toUpperCase()}
                     </span>
-                  </div>
-                  <span className="mt-1 text-[11px] text-[#A1A1AA]">
-                    {meta.regionLabel}
-                  </span>
-                </button>
-              );
-            })}
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        </div>
 
-        {/* Aspect Ratio & Duration + Ad Angle */}
-        <div className="flex flex-col gap-2 border-t border-[#27272A] pt-3">
-          <div className="grid grid-cols-2 gap-2">
-            <div className="flex flex-col gap-1">
-              <span className="text-[11px] text-[#A1A1AA]">Aspect Ratio</span>
-              <div className="grid grid-cols-2 gap-1 rounded border border-[#27272A] bg-[#09090B] p-1">
+          <div className="grid grid-cols-2 gap-2.5">
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-[#1C1917]">Format</span>
+              <div className="grid grid-cols-2 gap-1 rounded-full bg-[#F4EFE6] p-1">
                 {(['9:16', '16:9'] as const).map((ratio) => (
                   <button
                     key={ratio}
                     type="button"
                     onClick={() => onChangeAspectRatio(ratio)}
-                    className={`font-mono-code rounded py-1 text-[11px] font-medium ${
+                    className={`font-mono-code min-h-[32px] rounded-full py-1 text-xs font-semibold transition-colors ${
                       aspectRatio === ratio
-                        ? 'bg-[#6366F1] text-[#FAFAFA]'
-                        : 'text-[#A1A1AA] hover:text-[#FAFAFA]'
+                        ? 'bg-[#15803D] text-white'
+                        : 'text-[#57534E] hover:text-[#1C1917]'
                     }`}
                   >
                     {ratio}
@@ -382,18 +384,20 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
               </div>
             </div>
 
-            <div className="flex flex-col gap-1">
-              <span className="text-[11px] text-[#A1A1AA]">Clip Duration</span>
-              <div className="grid grid-cols-3 gap-1 rounded border border-[#27272A] bg-[#09090B] p-1">
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-[#1C1917]">
+                Duration
+              </span>
+              <div className="grid grid-cols-3 gap-1 rounded-full bg-[#F4EFE6] p-1">
                 {([4, 6, 8] as const).map((sec) => (
                   <button
                     key={sec}
                     type="button"
                     onClick={() => onChangeDurationSeconds(sec)}
-                    className={`font-mono-code rounded py-1 text-[11px] font-medium ${
+                    className={`font-mono-code min-h-[32px] rounded-full py-1 text-xs font-semibold transition-colors ${
                       durationSeconds === sec
-                        ? 'bg-[#6366F1] text-[#FAFAFA]'
-                        : 'text-[#A1A1AA] hover:text-[#FAFAFA]'
+                        ? 'bg-[#15803D] text-white'
+                        : 'text-[#57534E] hover:text-[#1C1917]'
                     }`}
                   >
                     {sec}s
@@ -403,89 +407,72 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center justify-between pt-1">
-            <span className="flex items-center gap-1.5 text-xs font-medium text-[#FAFAFA]">
-              <Tag className="h-3.5 w-3.5 text-[#6366F1]" />
-              <span>D2C Ad Angle</span>
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            {AD_ANGLES.map((angle) => {
-              const active = adAngle === angle;
-              const info = ANGLE_UI_LABELS[angle];
-              return (
-                <button
-                  key={angle}
-                  type="button"
-                  onClick={() => onChangeAdAngle(angle)}
-                  className={`flex flex-col items-start rounded border p-2 text-left transition-colors ${
-                    active
-                      ? 'border-[#6366F1] bg-[#09090B] text-[#FAFAFA]'
-                      : 'border-[#27272A] bg-[#09090B] text-[#A1A1AA] hover:border-[#FAFAFA]/40 hover:text-[#FAFAFA]'
-                  }`}
-                >
-                  <span className="text-xs font-semibold text-[#FAFAFA]">
-                    {info.title}
-                  </span>
-                  <span className="font-mono-code mt-0.5 text-[10px] text-[#A1A1AA]">
-                    {info.tag}
-                  </span>
-                </button>
-              );
-            })}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-[#1C1917]">Ad Style</span>
+            <div className="grid grid-cols-2 gap-2">
+              {AD_ANGLES.map((angle) => {
+                const active = adAngle === angle;
+                return (
+                  <button
+                    key={angle}
+                    type="button"
+                    onClick={() => onChangeAdAngle(angle)}
+                    className={`flex min-h-[38px] items-center rounded-xl border px-3 py-1.5 text-left text-xs font-medium transition-colors ${
+                      active
+                        ? 'border-[#15803D] bg-[#F0FDF4] font-semibold text-[#166534]'
+                        : 'border-[#E6E0D5] bg-[#FAF7F2] text-[#1C1917] hover:border-[#D6CEC0]'
+                    }`}
+                  >
+                    {ANGLE_UI_LABELS[angle]}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
 
-        {/* Product Assets & Metadata Editor */}
-        <div className="border-t border-[#27272A] pt-3">
+        {/* Product Details & Collapsible Script Editor */}
+        <div className="border-t border-[#E6E0D5] pt-4">
           {showSkeleton ? (
             <div
               data-testid="scraper-skeleton"
-              className="flex flex-col gap-3 rounded border border-[#27272A] bg-[#09090B] p-3"
+              className="flex flex-col gap-3 rounded-xl border border-[#E6E0D5] bg-[#FAF7F2] p-3"
             >
-              <div className="h-3.5 w-28 animate-pulse rounded bg-[#27272A]" />
+              <div className="h-3.5 w-28 animate-pulse rounded-full bg-[#E6E0D5]" />
               <div className="grid grid-cols-2 gap-2">
-                <div className="h-9 animate-pulse rounded border border-[#27272A] bg-[#18181B]" />
-                <div className="h-9 animate-pulse rounded border border-[#27272A] bg-[#18181B]" />
+                <div className="h-10 animate-pulse rounded-xl bg-[#F4EFE6]" />
+                <div className="h-10 animate-pulse rounded-xl bg-[#F4EFE6]" />
               </div>
-              <div className="h-16 w-full animate-pulse rounded border border-[#27272A] bg-[#18181B]" />
+              <div className="h-16 w-full animate-pulse rounded-xl bg-[#F4EFE6]" />
             </div>
           ) : showEmpty ? (
             <div
               data-testid="scraper-empty-state"
-              className="flex flex-col items-center justify-center gap-3 rounded border border-[#27272A] bg-[#09090B] p-6 text-center"
+              className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-[#E6E0D5] bg-[#FAF7F2] p-6 text-center"
             >
-              <div className="flex h-10 w-10 items-center justify-center rounded border border-[#27272A] bg-[#18181B]">
-                <PackageSearch className="h-5 w-5 text-[#6366F1]" />
+              <div className="flex h-11 w-11 items-center justify-center rounded-full border border-[#BBF7D0] bg-[#F0FDF4]">
+                <PackageSearch className="h-5 w-5 text-[#166534]" />
               </div>
-              <p className="text-xs text-[#A1A1AA]">
-                No script draft loaded. Fetch a live storefront URL above or
-                load localized copy scaffolding.
+              <p className="text-xs text-[#57534E]">
+                No product loaded yet. Import a store URL above or start with a
+                ready-to-edit localized template.
               </p>
               <button
                 type="button"
                 onClick={onLoadDefaultPreset}
-                className="rounded border border-[#6366F1] bg-[#6366F1] px-3 py-1.5 text-xs font-semibold text-[#FAFAFA] transition-colors hover:bg-[#5254E8]"
+                className="min-h-[40px] rounded-full bg-[#15803D] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#166534]"
               >
                 Load Localized Copy Template
               </button>
             </div>
           ) : (
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center justify-between">
-                <span className="flex items-center gap-1.5 text-xs font-medium text-[#FAFAFA]">
-                  <Type className="h-3.5 w-3.5 text-[#6366F1]" />
-                  <span>Confirmed Facts & Localized Script</span>
-                </span>
-              </div>
-
+            <div className="flex flex-col gap-3.5">
               {/* Brand & Price Row */}
-              <div className="grid grid-cols-2 gap-2">
-                <div className="flex flex-col gap-1">
+              <div className="grid grid-cols-2 gap-2.5">
+                <div className="flex min-w-0 flex-col gap-1">
                   <label
                     htmlFor="brand-name-input"
-                    className="text-[11px] text-[#A1A1AA]"
+                    className="text-xs font-medium text-[#1C1917]"
                   >
                     Brand Name *
                   </label>
@@ -495,13 +482,32 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
                     value={brandName}
                     placeholder="Verified brand"
                     onChange={(e) => onChangeBrandName(e.target.value)}
-                    className="rounded border border-[#27272A] bg-[#09090B] px-2.5 py-1.5 text-xs text-[#FAFAFA] focus:border-[#6366F1] focus:outline-none"
+                    onBlur={() => markTouched('brandName')}
+                    aria-invalid={brandInvalid}
+                    aria-describedby={
+                      brandInvalid ? 'brand-name-error' : undefined
+                    }
+                    className={`min-h-[40px] w-full rounded-xl border bg-[#FAF7F2] px-3 py-2 text-xs text-[#1C1917] placeholder-[#6E6A63] focus:bg-white focus:outline-none ${
+                      brandInvalid
+                        ? 'border-[#B91C1C]'
+                        : 'border-[#D6CEC0] focus:border-[#15803D]'
+                    }`}
                   />
+                  {brandInvalid ? (
+                    <p
+                      id="brand-name-error"
+                      role="alert"
+                      className="text-[11px] font-medium text-[#B91C1C]"
+                    >
+                      Enter your brand name
+                    </p>
+                  ) : null}
                 </div>
-                <div className="flex flex-col gap-1">
+
+                <div className="flex min-w-0 flex-col gap-1">
                   <label
                     htmlFor="price-display-input"
-                    className="text-[11px] text-[#A1A1AA]"
+                    className="text-xs font-medium text-[#1C1917]"
                   >
                     Verified Price *
                   </label>
@@ -511,73 +517,72 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
                     value={priceDisplay}
                     placeholder="e.g. PKR 4,990"
                     onChange={(e) => onChangePriceDisplay(e.target.value)}
-                    className="font-mono-code tabular-nums rounded border border-[#27272A] bg-[#09090B] px-2.5 py-1.5 text-xs text-[#FAFAFA] focus:border-[#6366F1] focus:outline-none"
+                    onBlur={() => markTouched('priceDisplay')}
+                    aria-invalid={priceInvalid}
+                    aria-describedby={
+                      priceInvalid ? 'price-display-error' : undefined
+                    }
+                    className={`font-mono-code tabular-nums min-h-[40px] w-full rounded-xl border bg-[#FAF7F2] px-3 py-2 text-xs text-[#1C1917] placeholder-[#6E6A63] focus:bg-white focus:outline-none ${
+                      priceInvalid
+                        ? 'border-[#B91C1C]'
+                        : 'border-[#D6CEC0] focus:border-[#15803D]'
+                    }`}
                   />
+                  {priceInvalid ? (
+                    <p
+                      id="price-display-error"
+                      role="alert"
+                      className="text-[11px] font-medium text-[#B91C1C]"
+                    >
+                      Enter verified price
+                    </p>
+                  ) : null}
                 </div>
               </div>
 
-              {/* Product Title & Optional Compare/Promo Row */}
-              <div className="grid grid-cols-3 gap-2">
-                <div className="col-span-2 flex flex-col gap-1">
-                  <label
-                    htmlFor="product-title-input"
-                    className="text-[11px] text-[#A1A1AA]"
-                  >
-                    Product Title *
-                  </label>
-                  <input
-                    id="product-title-input"
-                    type="text"
-                    dir={fontMeta.dir}
-                    value={productTitle}
-                    placeholder="Product name"
-                    onChange={(e) => onChangeProductTitle(e.target.value)}
-                    className={`${scriptClassName} rounded border border-[#27272A] bg-[#09090B] px-2.5 py-1.5 text-xs text-[#FAFAFA] focus:border-[#6366F1] focus:outline-none`}
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <label
-                    htmlFor="discount-badge-input"
-                    className="text-[11px] text-[#A1A1AA]"
-                  >
-                    Promo Tag
-                  </label>
-                  <input
-                    id="discount-badge-input"
-                    type="text"
-                    value={discountBadge}
-                    placeholder="Optional"
-                    onChange={(e) => onChangeDiscountBadge(e.target.value)}
-                    className="font-mono-code tabular-nums rounded border border-[#27272A] bg-[#09090B] px-2.5 py-1.5 text-xs text-[#FAFAFA] focus:border-[#6366F1] focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-1">
+              {/* Product Title */}
+              <div className="flex min-w-0 flex-col gap-1">
                 <label
-                  htmlFor="orig-price-input"
-                  className="text-[11px] text-[#A1A1AA]"
+                  htmlFor="product-title-input"
+                  className="text-xs font-medium text-[#1C1917]"
                 >
-                  Original Compare-At Price (optional)
+                  Product Title *
                 </label>
                 <input
-                  id="orig-price-input"
+                  id="product-title-input"
                   type="text"
-                  value={originalPriceDisplay}
-                  placeholder="Leave blank if none"
-                  onChange={(e) =>
-                    onChangeOriginalPriceDisplay(e.target.value)
+                  dir={fontMeta.dir}
+                  value={productTitle}
+                  placeholder="Product name"
+                  onChange={(e) => onChangeProductTitle(e.target.value)}
+                  onBlur={() => markTouched('productTitle')}
+                  aria-invalid={titleInvalid}
+                  aria-describedby={
+                    titleInvalid ? 'product-title-error' : undefined
                   }
-                  className="font-mono-code rounded border border-[#27272A] bg-[#09090B] px-2.5 py-1.5 text-xs text-[#FAFAFA] focus:border-[#6366F1] focus:outline-none"
+                  className={`${scriptClassName} min-h-[40px] w-full rounded-xl border bg-[#FAF7F2] px-3 py-2 text-xs text-[#1C1917] placeholder-[#6E6A63] focus:bg-white focus:outline-none ${
+                    titleInvalid
+                      ? 'border-[#B91C1C]'
+                      : 'border-[#D6CEC0] focus:border-[#15803D]'
+                  }`}
                 />
+                {titleInvalid ? (
+                  <p
+                    id="product-title-error"
+                    role="alert"
+                    className="text-[11px] font-medium text-[#B91C1C]"
+                  >
+                    Enter the product name to display in the ad
+                  </p>
+                ) : null}
               </div>
 
-              {/* Product Visual Conditioning: URL or Uploaded Workspace Asset */}
-              <div className="flex flex-col gap-2 rounded border border-[#27272A] bg-[#09090B] p-2.5">
-                <div className="flex items-center justify-between">
-                  <span className="flex items-center gap-1.5 text-[11px] font-medium text-[#FAFAFA]">
-                    <ImagePlus className="h-3.5 w-3.5 text-[#6366F1]" />
-                    <span>Product Image / Asset</span>
+              {/* Product Image / Asset */}
+              <div className="flex flex-col gap-2 rounded-xl border border-[#E6E0D5] bg-[#FAF7F2] p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5 text-xs font-medium text-[#1C1917]">
+                    <ImagePlus className="h-3.5 w-3.5 text-[#166534]" />
+                    <span>Product Image</span>
                   </span>
                   <input
                     ref={fileInputRef}
@@ -596,14 +601,16 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
                     type="button"
                     disabled={isUploadingAsset || !isAuthenticated}
                     onClick={() => fileInputRef.current?.click()}
-                    className="rounded border border-[#27272A] bg-[#18181B] px-2 py-0.5 text-[10px] font-medium text-[#FAFAFA] hover:border-[#6366F1] disabled:opacity-50"
+                    className="min-h-[32px] rounded-full border border-[#D6CEC0] bg-white px-3 py-1 text-[11px] font-medium text-[#1C1917] transition-colors hover:border-[#15803D] hover:text-[#166534] disabled:opacity-50"
                   >
                     {isUploadingAsset ? 'Uploading…' : 'Upload PNG/JPG'}
                   </button>
                 </div>
 
                 {assetUploadError ? (
-                  <p className="text-[11px] text-red-400">{assetUploadError}</p>
+                  <p className="text-[11px] font-medium text-[#B91C1C]">
+                    {assetUploadError}
+                  </p>
                 ) : null}
 
                 {workspaceAssets.length > 0 ? (
@@ -611,12 +618,13 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
                     aria-label="Workspace Uploaded Product Asset"
                     value={selectedAssetId}
                     onChange={(e) => onChangeSelectedAssetId(e.target.value)}
-                    className="font-mono-code rounded border border-[#27272A] bg-[#18181B] px-2 py-1 text-[11px] text-[#FAFAFA]"
+                    className="min-h-[36px] w-full rounded-xl border border-[#D6CEC0] bg-white px-3 py-1 text-xs text-[#1C1917]"
                   >
-                    <option value="">-- Optional: Select uploaded asset --</option>
+                    <option value="">-- Select uploaded asset --</option>
                     {workspaceAssets.map((asset) => (
                       <option key={asset.id} value={asset.id}>
-                        {asset.filename} ({Math.round(asset.size_bytes / 1024)} KB)
+                        {asset.filename} ({Math.round(asset.size_bytes / 1024)}{' '}
+                        KB)
                       </option>
                     ))}
                   </select>
@@ -624,114 +632,173 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
 
                 <input
                   type="url"
+                  aria-label="Direct Product Image URL"
                   value={productImageUrl}
                   onChange={(e) => onChangeProductImageUrl(e.target.value)}
-                  placeholder="https://... extracted or direct product image URL"
-                  className="font-mono-code rounded border border-[#27272A] bg-[#18181B] px-2 py-1 text-[11px] text-[#FAFAFA] focus:border-[#6366F1] focus:outline-none"
+                  placeholder="https://... direct product image URL"
+                  className="min-h-[38px] w-full rounded-xl border border-[#D6CEC0] bg-white px-3 py-1.5 text-xs text-[#1C1917] placeholder-[#6E6A63] focus:border-[#15803D] focus:outline-none"
                 />
 
                 {scrapeMetadata?.image_candidates &&
                 scrapeMetadata.image_candidates.length > 0 ? (
-                  <div className="flex flex-wrap gap-1">
+                  <div className="flex flex-wrap gap-1.5">
                     {scrapeMetadata.image_candidates.slice(0, 4).map((cand, i) => (
                       <button
                         key={cand}
                         type="button"
                         onClick={() => onChangeProductImageUrl(cand)}
-                        className={`font-mono-code rounded border px-1.5 py-0.5 text-[10px] ${
+                        className={`min-h-[30px] rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${
                           productImageUrl === cand
-                            ? 'border-[#6366F1] text-[#FAFAFA]'
-                            : 'border-[#27272A] text-[#A1A1AA]'
+                            ? 'border-[#15803D] bg-[#F0FDF4] text-[#166534]'
+                            : 'border-[#E6E0D5] bg-white text-[#57534E]'
                         }`}
                       >
-                        Candidate #{i + 1}
+                        Image #{i + 1}
                       </button>
                     ))}
                   </div>
                 ) : null}
               </div>
 
-              {/* Opening Hook Headline */}
-              <div className="flex flex-col gap-1">
-                <label
-                  htmlFor="hook-text-input"
-                  className="text-[11px] text-[#A1A1AA]"
-                >
-                  Opening Hook ({fontMeta.dir.toUpperCase()})
-                </label>
-                <textarea
-                  id="hook-text-input"
-                  rows={2}
-                  dir={fontMeta.dir}
-                  value={hookText}
-                  onChange={(e) => onChangeHookText(e.target.value)}
-                  className={`${scriptClassName} rounded border border-[#27272A] bg-[#09090B] px-2.5 py-1.5 text-xs text-[#FAFAFA] focus:border-[#6366F1] focus:outline-none`}
+              {/* Progressive Disclosure Toggle: Script, Captions & Promo */}
+              <button
+                type="button"
+                aria-expanded={showScriptEditor}
+                onClick={() => setShowScriptEditor((prev) => !prev)}
+                className="flex min-h-[40px] w-full items-center justify-between rounded-xl border border-[#E6E0D5] bg-[#FAF7F2] px-3.5 py-2 text-xs font-medium text-[#1C1917] transition-colors hover:border-[#D6CEC0] hover:bg-[#F4EFE6]"
+              >
+                <span>Customize script, captions &amp; promo</span>
+                <ChevronDown
+                  className={`h-4 w-4 text-[#57534E] transition-transform ${
+                    showScriptEditor ? 'rotate-180' : ''
+                  }`}
                 />
-              </div>
+              </button>
 
-              {/* Animated Captions */}
-              <div className="flex flex-col gap-2">
-                <span className="text-[11px] text-[#A1A1AA]">
-                  Animated Captions & Highlight Words
-                </span>
-                {captions.map((cap, idx) => (
-                  <div
-                    key={cap.id}
-                    className="flex flex-col gap-1.5 rounded border border-[#27272A] bg-[#09090B] p-2"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-mono-code tabular-nums text-[10px] font-semibold text-[#6366F1]">
-                        SEG #{idx + 1} · {cap.startFrame}F–{cap.endFrame}F
-                      </span>
+              {showScriptEditor ? (
+                <div className="flex flex-col gap-3 rounded-xl border border-[#E6E0D5] bg-[#FAF7F2] p-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="flex flex-col gap-1">
+                      <label
+                        htmlFor="discount-badge-input"
+                        className="text-[11px] font-medium text-[#57534E]"
+                      >
+                        Promo Tag
+                      </label>
                       <input
+                        id="discount-badge-input"
                         type="text"
-                        dir={fontMeta.dir}
-                        value={cap.highlightWord ?? ''}
-                        onChange={(e) =>
-                          onChangeCaptionHighlight(idx, e.target.value)
-                        }
-                        placeholder="Highlight word"
-                        aria-label={`Caption ${idx + 1} highlight word`}
-                        className={`${scriptClassName} w-28 rounded border border-[#27272A] bg-[#18181B] px-2 py-0.5 text-[11px] text-[#FAFAFA] focus:border-[#6366F1] focus:outline-none`}
+                        value={discountBadge}
+                        placeholder="Optional"
+                        onChange={(e) => onChangeDiscountBadge(e.target.value)}
+                        className="min-h-[36px] w-full rounded-xl border border-[#D6CEC0] bg-white px-2.5 py-1 text-xs text-[#1C1917] placeholder-[#6E6A63] focus:border-[#15803D] focus:outline-none"
                       />
                     </div>
-                    <input
-                      type="text"
+                    <div className="flex flex-col gap-1">
+                      <label
+                        htmlFor="orig-price-input"
+                        className="text-[11px] font-medium text-[#57534E]"
+                      >
+                        Original Price
+                      </label>
+                      <input
+                        id="orig-price-input"
+                        type="text"
+                        value={originalPriceDisplay}
+                        placeholder="Compare-at"
+                        onChange={(e) =>
+                          onChangeOriginalPriceDisplay(e.target.value)
+                        }
+                        className="font-mono-code min-h-[36px] w-full rounded-xl border border-[#D6CEC0] bg-white px-2.5 py-1 text-xs text-[#1C1917] placeholder-[#6E6A63] focus:border-[#15803D] focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Opening Hook */}
+                  <div className="flex flex-col gap-1">
+                    <label
+                      htmlFor="hook-text-input"
+                      className="text-[11px] font-medium text-[#57534E]"
+                    >
+                      Opening Hook
+                    </label>
+                    <textarea
+                      id="hook-text-input"
+                      rows={2}
                       dir={fontMeta.dir}
-                      value={cap.text}
-                      onChange={(e) => onChangeCaptionText(idx, e.target.value)}
-                      aria-label={`Caption ${idx + 1} text`}
-                      className={`${scriptClassName} w-full rounded border border-[#27272A] bg-[#18181B] px-2 py-1 text-xs text-[#FAFAFA] focus:border-[#6366F1] focus:outline-none`}
+                      value={hookText}
+                      onChange={(e) => onChangeHookText(e.target.value)}
+                      className={`${scriptClassName} w-full rounded-xl border border-[#D6CEC0] bg-white px-3 py-2 text-xs text-[#1C1917] focus:border-[#15803D] focus:outline-none`}
                     />
                   </div>
-                ))}
-              </div>
 
-              {/* CTA Text */}
-              <div className="flex flex-col gap-1">
-                <label
-                  htmlFor="cta-text-input"
-                  className="text-[11px] text-[#A1A1AA]"
-                >
-                  Bottom Dock CTA Text
-                </label>
-                <input
-                  id="cta-text-input"
-                  type="text"
-                  dir={fontMeta.dir}
-                  value={ctaText}
-                  onChange={(e) => onChangeCtaText(e.target.value)}
-                  className={`${scriptClassName} rounded border border-[#27272A] bg-[#09090B] px-2.5 py-1.5 text-xs text-[#FAFAFA] focus:border-[#6366F1] focus:outline-none`}
-                />
-              </div>
+                  {/* Animated Captions */}
+                  <div className="flex flex-col gap-2">
+                    <span className="text-[11px] font-medium text-[#57534E]">
+                      Captions &amp; Highlight Words
+                    </span>
+                    {captions.map((cap, idx) => (
+                      <div
+                        key={cap.id}
+                        className="flex flex-col gap-1.5 rounded-xl border border-[#E6E0D5] bg-white p-2.5"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-mono-code tabular-nums text-[10px] font-semibold text-[#166534]">
+                            #{idx + 1} · {cap.startFrame}F–{cap.endFrame}F
+                          </span>
+                          <input
+                            type="text"
+                            dir={fontMeta.dir}
+                            value={cap.highlightWord ?? ''}
+                            onChange={(e) =>
+                              onChangeCaptionHighlight(idx, e.target.value)
+                            }
+                            placeholder="Highlight"
+                            aria-label={`Caption ${idx + 1} highlight word`}
+                            className={`${scriptClassName} min-h-[32px] w-28 rounded-lg border border-[#D6CEC0] bg-[#FAF7F2] px-2 py-0.5 text-[11px] text-[#1C1917] placeholder-[#6E6A63] focus:border-[#15803D] focus:outline-none`}
+                          />
+                        </div>
+                        <input
+                          type="text"
+                          dir={fontMeta.dir}
+                          value={cap.text}
+                          onChange={(e) =>
+                            onChangeCaptionText(idx, e.target.value)
+                          }
+                          aria-label={`Caption ${idx + 1} text`}
+                          className={`${scriptClassName} min-h-[36px] w-full rounded-lg border border-[#D6CEC0] bg-[#FAF7F2] px-2.5 py-1 text-xs text-[#1C1917] focus:border-[#15803D] focus:outline-none`}
+                        />
+                      </div>
+                    ))}
+                  </div>
 
-              {/* Mandatory Storefront Truth Confirmation */}
-              <label className="flex cursor-pointer items-start gap-2 rounded border border-[#27272A] bg-[#09090B] p-2.5 text-[11px] text-[#FAFAFA]">
+                  {/* CTA Text */}
+                  <div className="flex flex-col gap-1">
+                    <label
+                      htmlFor="cta-text-input"
+                      className="text-[11px] font-medium text-[#57534E]"
+                    >
+                      Bottom Button CTA
+                    </label>
+                    <input
+                      id="cta-text-input"
+                      type="text"
+                      dir={fontMeta.dir}
+                      value={ctaText}
+                      onChange={(e) => onChangeCtaText(e.target.value)}
+                      className={`${scriptClassName} min-h-[36px] w-full rounded-xl border border-[#D6CEC0] bg-white px-3 py-1.5 text-xs text-[#1C1917] focus:border-[#15803D] focus:outline-none`}
+                    />
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Mandatory Confirmation */}
+              <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-[#E6E0D5] bg-[#FAF7F2] p-3 text-xs text-[#1C1917]">
                 <input
                   type="checkbox"
                   checked={fieldsConfirmed}
                   onChange={(e) => onChangeFieldsConfirmed(e.target.checked)}
-                  className="mt-0.5 h-3.5 w-3.5 accent-[#6366F1]"
+                  className="mt-0.5 h-4 w-4 shrink-0 rounded accent-[#15803D]"
                 />
                 <span>
                   I confirm the brand, title, price, and ad copy accurately match
@@ -743,15 +810,15 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
         </div>
 
         {/* Primary Action */}
-        <div className="flex flex-col gap-2 border-t border-[#27272A] pt-3">
+        <div className="border-t border-[#E6E0D5] pt-4">
           {creditBalance < 1 ? (
             <button
               type="button"
               disabled={!isAuthenticated}
               onClick={onOpenCreditModal}
-              className="flex w-full items-center justify-center gap-2 rounded border border-red-500/80 bg-[#09090B] px-4 py-2.5 text-xs font-semibold text-[#FAFAFA] transition-colors hover:border-[#6366F1] disabled:opacity-50"
+              className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-full border border-[#FECACA] bg-[#FEF2F2] px-5 py-2.5 text-xs font-semibold text-[#B91C1C] transition-colors hover:bg-[#FEE2E2] disabled:opacity-50"
             >
-              <Sparkles className="h-4 w-4 text-[#6366F1]" />
+              <Sparkles className="h-4 w-4" />
               <span className="tabular-nums">
                 0 Credits Remaining — Buy Credits
               </span>
@@ -761,12 +828,12 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
               type="button"
               onClick={onGenerateVideo}
               disabled={!canDispatchRender}
-              className="flex w-full items-center justify-center gap-2 rounded border border-[#6366F1] bg-[#6366F1] px-4 py-2.5 text-xs font-semibold text-[#FAFAFA] transition-colors hover:bg-[#5254E8] disabled:opacity-50"
+              className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-full bg-[#15803D] px-5 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-[#166534] disabled:opacity-50"
             >
               <Wand2 className="h-4 w-4" />
               <span className="tabular-nums">
                 {isGenerating
-                  ? 'Dispatching Veo 3.1 + Remotion Job…'
+                  ? 'Dispatching Video Render Job…'
                   : !hasRequiredFacts
                   ? 'Enter Brand, Title & Price First'
                   : !fieldsConfirmed
@@ -775,16 +842,6 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
               </span>
             </button>
           )}
-
-          <div className="flex items-center justify-between text-[11px] text-[#A1A1AA]">
-            <span className="flex items-center gap-1">
-              <CheckCircle2 className="h-3 w-3 text-[#6366F1]" />
-              Atomic Credit Reservation
-            </span>
-            <span className="font-mono-code tabular-nums">
-              veo-3.1-generate-001
-            </span>
-          </div>
         </div>
       </div>
     </aside>
