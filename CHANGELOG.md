@@ -1,5 +1,27 @@
 # Changelog
 
+## [2.1.0] — Enterprise Production Hardening & Commercial Readiness (2026-11-20)
+
+### Background Job Reliability & Safe Crash Recovery (`services/worker/app/tasks.py`, `db.py`, `config.py`)
+- Eliminated silent production fallback to `memory://` broker and `CELERY_ALWAYS_EAGER=true` (`validate_production_config()`, `configure_celery_app()`, `dispatch_video_job()`). Missing/unreachable Redis now fails closed with `BrokerUnavailableError`, refunds the reserved credit atomically, and returns `HTTP 503`.
+- Enforced Celery task soft/hard timeouts (`JOB_SOFT_TIME_LIMIT_SECONDS`, `JOB_HARD_TIME_LIMIT_SECONDS`), `task_acks_late=True`, `worker_prefetch_multiplier=1`, and bounded retries with exponential backoff + jitter separating `TransientJobError` from `PermanentJobError`.
+- Added atomic worker job ownership and crash recovery (`worker_id`, `lease_expires_at`, `heartbeat_at`, monotonic `fencing_token`, and `correlation_id` via migration `004_job_leases_and_immutability.sql`). Active workers renew leases via `_LeaseHeartbeatThread`; every intermediate/final state transition verifies `(worker_id, fencing_token)` (`StaleWorkerLeaseError`); `recover_interrupted_jobs()` reclaims only expired or unclaimed stale jobs and refunds credits at most once.
+- Fixed a concurrent file write race in `ensure_sample_fixture()` (`services/worker/app/veo.py`) discovered during Phase 12 parallel load testing using `_FIXTURE_LOCK` + atomic `os.replace()`.
+
+### Distributed Rate Limiting & Connection-Time SSRF Defense (`services/worker/app/security.py`, `scraper.py`)
+- Replaced process-local rate limiting with `DistributedRateLimiter` supporting Redis atomic Lua sliding-window counters + burst protection shared across API instances (and deterministic `SharedRateLimitStore` / non-production local fallback), enforcing `HTTP 429`, `Retry-After`, and `X-RateLimit-*` across 8 separate configurable categories (`auth_login`, `auth_register`, `auth_password_reset`, `video_generate`, `video_render_retry`, `product_scrape`, `file_download`, `billing_checkout`).
+- Upgraded SSRF protection with `SSRFSafeNetworkBackend` (`httpcore.SyncBackend`) pinning DNS resolution strictly to validated global IPs at TCP socket connection time, blocking CGNAT (`100.64.0.0/10`), loopback/private/link-local/metadata/IPv6-mapped/6to4/Teredo and obfuscated IP literals, restricting internal ports, revalidating every redirect hop, capping response bytes (`Accept-Encoding: identity`), and enforcing `12s` wall-clock deadlines and Content-Type checks.
+
+### Billing Reconciliation, Database RLS & Auth/RBAC Hardening (`billing.py`, `auth.py`, `main.py`, `schema.sql`)
+- Reconciled out-of-order Stripe `charge.refunded` / `charge.dispute.created` webhooks automatically upon delayed `checkout.session.completed` / `async_payment_succeeded` delivery (`billing.py`), added `ON DELETE RESTRICT` + `trg_credit_ledger_no_delete` SQL trigger + ORM `before_delete`/`before_update` immutability guards, and exposed `GET /v1/workspaces/{workspace_id}/credits/reconcile`.
+- Added PostgreSQL connection pool configuration (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, `DB_POOL_RECYCLE`) and enabled `FORCE ROW LEVEL SECURITY` across all tables in `schema.sql` and migration `004`.
+- Rejected valid JWTs belonging to locked accounts (`HTTP 403`) in `get_current_user()`, added `POST /v1/auth/logout-all` (and Studio BFF allowlist support), added `DELETE /v1/workspaces/{workspace_id}/members/{member_user_id}` enforcing owner/admin hierarchy, propagated `X-Request-ID` to `VideoJob.correlation_id`, enriched `GET /health`, and added `GET /v1/ops/metrics`.
+
+### CI/CD, Testing, Benchmarks & Operational Runbooks
+- Hardened `.github/workflows/ci.yml` (`permissions: contents: read`, `pip-audit --strict --desc`, schema migration smoke verification, `npm audit --omit=dev --audit-level=high`, secret pattern check) and added `[prod]`/`[dev]` extras in `services/worker/pyproject.toml`.
+- Added regression suites in `services/worker/tests/test_hardening_phases.py` (`36` passing Python tests total), Studio BFF tests in `apps/studio/src/__tests__/studio.test.ts` (`9/9` passing), and concurrent benchmark runner `services/worker/scripts/run_benchmarks.py` (`0.0%` errors, `is_balanced: true`).
+- Authored full audit and enterprise operational docs: `AUDIT/PRODUCTION_HARDENING_AUDIT.md`, `AUDIT/FINAL_PRODUCTION_READINESS_REPORT.md`, `PRODUCTION_READINESS.md`, `DEPLOYMENT_GUIDE.md`, `ENVIRONMENT_VARIABLES.md`, `DATABASE_MIGRATIONS.md`, `BACKGROUND_JOBS.md`, `INCIDENT_RESPONSE.md`, `BACKUP_AND_RECOVERY.md`, `MONITORING.md`, and `TESTING_GUIDE.md`.
+
 ## [2.0.0] — Commercial SaaS Hardening & Pipeline Repair
 
 ### Security & Multi-Tenant Architecture
