@@ -62,6 +62,8 @@ export const StudioWorkspace: React.FC = () => {
   const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   const [authModalMode, setAuthModalMode] = useState<AuthModalMode>('login');
+  const [authExternalError, setAuthExternalError] = useState<string | null>(null);
+  const [authVerifyToken, setAuthVerifyToken] = useState<string>('');
 
   const [viewStateMode, setViewStateMode] = useState<ViewStateMode>('normal');
 
@@ -88,6 +90,7 @@ export const StudioWorkspace: React.FC = () => {
 
   const [hookText, setHookText] = useState<string>(initialDraft.hookText);
   const [ctaText, setCtaText] = useState<string>(initialDraft.ctaText);
+  const [customPrompt, setCustomPrompt] = useState<string>('');
   const [captions, setCaptions] = useState<CaptionSegment[]>(
     initialDraft.captions
   );
@@ -208,13 +211,50 @@ export const StudioWorkspace: React.FC = () => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       const checkoutStatus = params.get('checkout');
+      const authStatus = params.get('auth');
+      const authError = params.get('auth_error');
+      const verifyToken = params.get('verify_token');
+      let shouldCleanUrl = false;
+
       if (checkoutStatus === 'success') {
         setBannerMessage(
           'Returned from Stripe Checkout. Credits reflect verified Stripe webhook settlement.'
         );
-        window.history.replaceState({}, '', window.location.pathname);
+        shouldCleanUrl = true;
       } else if (checkoutStatus === 'cancelled') {
         setBannerMessage('Stripe Checkout cancelled. No charge was made.');
+        shouldCleanUrl = true;
+      }
+
+      if (authStatus === 'google_success') {
+        setAuthExternalError(null);
+        setBannerMessage('Signed in with Google.');
+        shouldCleanUrl = true;
+      } else if (authError) {
+        const errorMessages: Record<string, string> = {
+          google_not_configured:
+            'Google Sign-In is not configured on this server (missing GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET).',
+          google_cancelled: 'Google Sign-In was cancelled before completion.',
+          google_email_unverified:
+            'Your Google account email is not verified. Please verify it with Google first.',
+          google_auth_failed:
+            'Google Sign-In could not be verified. Please try again.',
+        };
+        setAuthExternalError(
+          errorMessages[authError] ??
+            'Google authentication failed. Please try again.'
+        );
+        setAuthModalMode('login');
+        setIsAuthModalOpen(true);
+        shouldCleanUrl = true;
+      } else if (verifyToken) {
+        setAuthVerifyToken(verifyToken);
+        setAuthModalMode('verify_email');
+        setIsAuthModalOpen(true);
+        shouldCleanUrl = true;
+      }
+
+      if (shouldCleanUrl) {
         window.history.replaceState({}, '', window.location.pathname);
       }
     }
@@ -539,6 +579,7 @@ export const StudioWorkspace: React.FC = () => {
     setFieldsConfirmed(false);
     setHookText('');
     setCtaText('');
+    setCustomPrompt('');
     setCaptions([]);
     setIsProductEmpty(true);
   }, []);
@@ -605,6 +646,7 @@ export const StudioWorkspace: React.FC = () => {
             hookText,
             ctaText,
             captions,
+            ...(customPrompt.trim() ? { veoPrompt: customPrompt.trim() } : {}),
             confirmedMetadata: {
               title: productTitle,
               brand: brandName,
@@ -690,6 +732,7 @@ export const StudioWorkspace: React.FC = () => {
     selectedAssetId,
     hookText,
     ctaText,
+    customPrompt,
     captions,
     scrapeMetadata,
     fetchWithAuthRetry,
@@ -782,6 +825,7 @@ export const StudioWorkspace: React.FC = () => {
       setProductImageUrl(script.product_image_url ?? '');
       setHookText(script.hook ?? '');
       setCtaText(script.cta_text ?? '');
+      setCustomPrompt(script.veo_prompt ?? '');
       setCaptions(
         (script.captions ?? []).map((c, idx) => ({
           id: c.id ?? `cap-${idx + 1}`,
@@ -1050,6 +1094,8 @@ export const StudioWorkspace: React.FC = () => {
             captions={captions}
             onChangeCaptionText={handleCaptionTextChange}
             onChangeCaptionHighlight={handleCaptionHighlightChange}
+            customPrompt={customPrompt}
+            onChangeCustomPrompt={setCustomPrompt}
             isScraping={isScraping}
             scrapeError={scrapeError}
             scrapeMetadata={scrapeMetadata}
@@ -1135,7 +1181,12 @@ export const StudioWorkspace: React.FC = () => {
         isOpen={isAuthModalOpen}
         initialMode={authModalMode}
         currentUserEmail={user?.email ?? ''}
-        onClose={() => setIsAuthModalOpen(false)}
+        externalError={authExternalError}
+        initialVerifyToken={authVerifyToken}
+        onClose={() => {
+          setIsAuthModalOpen(false);
+          setAuthExternalError(null);
+        }}
         onAuthSuccess={handleAuthSuccess}
       />
     </div>

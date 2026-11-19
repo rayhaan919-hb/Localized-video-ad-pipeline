@@ -34,12 +34,18 @@ from sqlalchemy.orm import Session
 import app.db as db_module
 from app.auth import (
     ACCESS_COOKIE_NAME,
+    OAUTH_STATE_COOKIE_NAME,
     REFRESH_COOKIE_NAME,
     AccountLockedError,
     EmailAlreadyRegisteredError,
+    EmailNotVerifiedError,
+    GoogleOAuthConfigError,
+    GoogleOAuthError,
     InvalidCredentialsError,
     authenticate_user,
+    build_google_oauth_start,
     confirm_password_reset,
+    exchange_google_oauth_code,
     get_current_user,
     issue_session_tokens,
     normalize_email,
@@ -48,6 +54,9 @@ from app.auth import (
     require_workspace_role,
     revoke_refresh_session,
     rotate_refresh_session,
+    send_verification_email,
+    upsert_google_user,
+    verify_google_oauth_state_cookie,
     verify_user_email,
 )
 from app.billing import (
@@ -129,6 +138,11 @@ class PasswordResetRequestBody(BaseModel):
 class PasswordResetConfirmBody(BaseModel):
     token: str = Field(..., min_length=10, max_length=256)
     new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class GoogleCallbackRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=2048)
+    state: str = Field(..., min_length=1, max_length=512)
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -236,6 +250,7 @@ def _serialize_user_summary(session: Session, user: User) -> dict[str, Any]:
         "id": user.id,
         "email": user.email,
         "full_name": user.full_name,
+        "auth_provider": getattr(user, "auth_provider", "password"),
         "is_email_verified": bool(user.is_email_verified),
         "is_admin": bool(user.is_admin),
         "workspaces": [
@@ -370,6 +385,16 @@ def health_check() -> Any:
 # ---------------------------------------------------------------------------
 
 
+@app.get("/v1/auth/providers")
+def auth_providers() -> dict[str, Any]:
+    """Advertise enabled authentication methods without leaking credentials."""
+    return {
+        "google_enabled": settings.is_google_oauth_configured,
+        "email_verification_required": settings.effective_require_email_verification,
+        "smtp_configured": settings.is_smtp_configured,
+    }
+
+
 @app.post("/v1/auth/register", status_code=status.HTTP_201_CREATED)
 def auth_register(
     payload: RegisterRequest,
@@ -385,13 +410,6 @@ def auth_register(
             password=payload.password,
             full_name=payload.full_name,
         )
-        tokens = issue_session_tokens(
-            db,
-            user,
-            user_agent=request.headers.get("user-agent", ""),
-            ip_address=get_client_ip(request),
-        )
-        db.commit()
     except EmailAlreadyRegisteredError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -399,6 +417,50 @@ def auth_register(
         db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    if settings.effective_require_email_verification:
+        email_sent = False
+        try:
+            email_sent = send_verification_email(user.email, verify_token)
+        except Exception as exc:
+            log_audit_event(
+                "verification_email_failed",
+                level="WARNING",
+                user_id=user.id,
+                details={"error": type(exc).__name__},
+            )
+        db.commit()
+        log_audit_event(
+            "user_registered_pending_verification",
+            user_id=user.id,
+            workspace_id=workspace.id,
+            ip_address=get_client_ip(request),
+            details={"email_sent": email_sent},
+        )
+        msg = (
+            "Verification link sent to your inbox. Check your email or paste "
+            "the code below before signing in."
+            if email_sent
+            else "Account created. Email verification is required before "
+            "sign-in (configure SMTP or use Continue with Google)."
+        )
+        result: dict[str, Any] = {
+            "verification_required": True,
+            "email_sent": email_sent,
+            "email": user.email,
+            "primary_workspace_id": workspace.id,
+            "message": msg,
+        }
+        if settings.effective_expose_dev_auth_tokens:
+            result["verify_email_token"] = verify_token
+        return result
+
+    tokens = issue_session_tokens(
+        db,
+        user,
+        user_agent=request.headers.get("user-agent", ""),
+        ip_address=get_client_ip(request),
+    )
+    db.commit()
     _set_auth_cookies(response, tokens)
     log_audit_event(
         "user_registered",
@@ -411,7 +473,7 @@ def auth_register(
         "user": _serialize_user_summary(db, user),
         "primary_workspace_id": workspace.id,
     }
-    if not settings.is_production:
+    if settings.effective_expose_dev_auth_tokens:
         result["verify_email_token"] = verify_token
     return result
 
@@ -435,6 +497,8 @@ def auth_login(
         db.commit()
     except AccountLockedError as exc:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+    except EmailNotVerifiedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except (InvalidCredentialsError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password."
@@ -511,17 +575,34 @@ def auth_me(
 def auth_verify_email(
     payload: VerifyEmailRequest,
     request: Request,
+    response: Response,
     db: Session = Depends(get_session),
 ) -> dict[str, Any]:
     _enforce_auth_rate_limit(request)
     try:
         user = verify_user_email(db, payload.token)
+        tokens = issue_session_tokens(
+            db,
+            user,
+            user_agent=request.headers.get("user-agent", ""),
+            ip_address=get_client_ip(request),
+        )
         db.commit()
     except InvalidCredentialsError as exc:
+        db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    _set_auth_cookies(response, tokens)
     log_audit_event("email_verified", user_id=user.id, ip_address=get_client_ip(request))
-    return {"verified": True, "email": user.email}
+    summary = _serialize_user_summary(db, user)
+    primary_ws_id = summary["workspaces"][0]["id"] if summary["workspaces"] else None
+    return {
+        "verified": True,
+        "email": user.email,
+        **tokens,
+        "user": summary,
+        "primary_workspace_id": primary_ws_id,
+    }
 
 
 @app.post("/v1/auth/password-reset/request")
@@ -541,7 +622,7 @@ def auth_password_reset_request(
         "accepted": True,
         "message": "If an account exists for that email, reset instructions have been issued.",
     }
-    if user is not None and raw_token is not None and not settings.is_production:
+    if user is not None and raw_token is not None and settings.effective_expose_dev_auth_tokens:
         resp["reset_token"] = raw_token
     return resp
 
@@ -562,6 +643,93 @@ def auth_password_reset_confirm(
 
     log_audit_event("password_reset_completed", user_id=user.id, ip_address=get_client_ip(request))
     return {"password_reset": True}
+
+
+@app.get("/v1/auth/google/start")
+def auth_google_start(
+    request: Request,
+    response: Response,
+    mode: Literal["login", "register"] = Query(default="login"),
+) -> dict[str, Any]:
+    _enforce_auth_rate_limit(request)
+    try:
+        auth_url, signed_cookie = build_google_oauth_start(mode)
+    except GoogleOAuthConfigError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+
+    response.set_cookie(
+        key=OAUTH_STATE_COOKIE_NAME,
+        value=signed_cookie,
+        max_age=600,
+        httponly=True,
+        samesite="lax",
+        secure=settings.is_production,
+        path="/",
+    )
+    return {"authorization_url": auth_url}
+
+
+@app.post("/v1/auth/google/callback")
+def auth_google_callback(
+    payload: GoogleCallbackRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_session),
+) -> dict[str, Any]:
+    _enforce_auth_rate_limit(request)
+    raw_cookie = request.cookies.get(OAUTH_STATE_COOKIE_NAME, "")
+    try:
+        state_payload = verify_google_oauth_state_cookie(raw_cookie, payload.state)
+        identity = exchange_google_oauth_code(
+            code=payload.code,
+            code_verifier=str(state_payload.get("code_verifier") or ""),
+        )
+        user, workspace, is_new = upsert_google_user(
+            db,
+            google_sub=identity["sub"],
+            email=identity["email"],
+            full_name=identity["name"],
+        )
+        tokens = issue_session_tokens(
+            db,
+            user,
+            user_agent=request.headers.get("user-agent", ""),
+            ip_address=get_client_ip(request),
+        )
+        db.commit()
+    except GoogleOAuthConfigError as exc:
+        db.rollback()
+        response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except GoogleOAuthError as exc:
+        db.rollback()
+        response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")
+        code = (
+            status.HTTP_403_FORBIDDEN
+            if "not verified" in str(exc).lower()
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+
+    _set_auth_cookies(response, tokens)
+    response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")
+    log_audit_event(
+        "user_google_authenticated",
+        user_id=user.id,
+        workspace_id=workspace.id,
+        ip_address=get_client_ip(request),
+        details={"is_new_user": is_new},
+    )
+    return {
+        **tokens,
+        "user": _serialize_user_summary(db, user),
+        "primary_workspace_id": workspace.id,
+        "is_new_user": is_new,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1370,6 +1538,11 @@ def retry_video_job(
         )
 
     prev_script = prev_job.script_json or {}
+    retry_custom = (
+        {"veoPrompt": str(prev_script["veo_prompt"])}
+        if prev_script.get("veo_prompt")
+        else None
+    )
     retry_payload = GenerateVideoRequest(
         workspace_id=uuid.UUID(prev_job.workspace_id),
         product_url=prev_job.product_url,  # type: ignore[arg-type]
@@ -1377,6 +1550,7 @@ def retry_video_job(
         ad_angle=str(prev_script.get("ad_angle") or "problem_solution"),
         aspect_ratio=prev_job.aspect_ratio or "9:16",  # type: ignore[arg-type]
         duration_seconds=float(prev_job.duration_seconds or 4),
+        custom_props=retry_custom,
     )
     return generate_video(
         payload=retry_payload,

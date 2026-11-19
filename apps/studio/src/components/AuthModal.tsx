@@ -24,6 +24,8 @@ interface AuthModalProps {
   isBlockingGate?: boolean;
   initialMode?: AuthModalMode;
   currentUserEmail?: string;
+  externalError?: string | null;
+  initialVerifyToken?: string;
   onClose?: () => void;
   onAuthSuccess: (
     user: AuthUserSummary,
@@ -35,6 +37,9 @@ interface AuthModalProps {
 interface AuthApiResponse {
   user?: AuthUserSummary;
   primary_workspace_id?: string;
+  verification_required?: boolean;
+  email_sent?: boolean;
+  email?: string;
   verify_email_token?: string;
   reset_token?: string;
   verified?: boolean;
@@ -43,11 +48,19 @@ interface AuthApiResponse {
   detail?: string;
 }
 
+interface AuthProvidersStatus {
+  google_enabled: boolean;
+  email_verification_required: boolean;
+  smtp_configured: boolean;
+}
+
 export const AuthModal: React.FC<AuthModalProps> = ({
   isOpen,
   isBlockingGate = false,
   initialMode = 'login',
   currentUserEmail = '',
+  externalError = null,
+  initialVerifyToken = '',
   onClose,
   onAuthSuccess,
 }) => {
@@ -55,12 +68,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [email, setEmail] = useState(currentUserEmail);
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
-  const [tokenInput, setTokenInput] = useState('');
+  const [tokenInput, setTokenInput] = useState(initialVerifyToken);
   const [newPassword, setNewPassword] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
+  const [providers, setProviders] = useState<AuthProvidersStatus>({
+    google_enabled: false,
+    email_verification_required: true,
+    smtp_configured: false,
+  });
 
   const markTouched = (field: string) =>
     setTouched((prev) => ({ ...prev, [field]: true }));
@@ -81,13 +99,35 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       setMode(initialMode);
-      setErrorMsg(null);
+      setErrorMsg(externalError ?? null);
       setTouched({});
       if (currentUserEmail) {
         setEmail(currentUserEmail);
       }
+      if (initialVerifyToken) {
+        setTokenInput(initialVerifyToken);
+      }
+      void fetch('/api/v1/auth/providers', {
+        method: 'GET',
+        cache: 'no-store',
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            return;
+          }
+          const data = (await res.json()) as Partial<AuthProvidersStatus>;
+          setProviders({
+            google_enabled: Boolean(data.google_enabled),
+            email_verification_required:
+              data.email_verification_required ?? true,
+            smtp_configured: Boolean(data.smtp_configured),
+          });
+        })
+        .catch(() => {
+          // ignore network hiccup on provider check
+        });
     }
-  }, [isOpen, initialMode, currentUserEmail]);
+  }, [isOpen, initialMode, currentUserEmail, externalError, initialVerifyToken]);
 
   useEffect(() => {
     if (!isOpen || isBlockingGate || !onClose) {
@@ -106,6 +146,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     return null;
   }
 
+  const handleGoogleContinue = () => {
+    setErrorMsg(null);
+    setInfoMsg(null);
+    if (!providers.google_enabled) {
+      setErrorMsg(
+        'Google Sign-In requires GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET in server environment configuration.'
+      );
+      return;
+    }
+    const oauthMode = mode === 'register' ? 'register' : 'login';
+    window.location.assign(
+      `/api/v1/auth/google/start?mode=${encodeURIComponent(oauthMode)}`
+    );
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
@@ -121,6 +176,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           body: JSON.stringify({ email, password }),
         });
         const data = (await res.json()) as AuthApiResponse;
+        if (res.status === 403 && (data.detail ?? '').toLowerCase().includes('verify')) {
+          setMode('verify_email');
+          setErrorMsg(data.detail ?? 'Please verify your email before signing in.');
+          return;
+        }
         if (!res.ok || !data.user) {
           throw new Error(data.detail ?? 'Authentication failed.');
         }
@@ -140,8 +200,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           }),
         });
         const data = (await res.json()) as AuthApiResponse;
-        if (!res.ok || !data.user) {
+        if (!res.ok) {
           throw new Error(data.detail ?? 'Account registration failed.');
+        }
+        if (data.verification_required || !data.user) {
+          if (data.verify_email_token) {
+            setTokenInput(data.verify_email_token);
+          }
+          setPassword('');
+          setInfoMsg(
+            data.message ??
+              'Account created. Verify your email address before signing in, or use Continue with Google.'
+          );
+          setMode('verify_email');
+          return;
         }
         if (data.verify_email_token) {
           setInfoMsg(
@@ -168,7 +240,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           throw new Error(data.detail ?? 'Verification failed.');
         }
         setInfoMsg('Email address verified cleanly.');
-        // Refresh /me session summary
+        if (data.user) {
+          onAuthSuccess(data.user, data.primary_workspace_id);
+          return;
+        }
         const meRes = await fetch('/api/v1/auth/me', {
           method: 'GET',
           credentials: 'include',
@@ -262,7 +337,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   : 'Sign in to Localized Ad Studio'}
               </h2>
               <p className="text-xs text-[#57534E]">
-                Private workspaces, product imports, and rendered videos
+                Verified accounts prevent spam and protect your workspaces
               </p>
             </div>
           </div>
@@ -298,6 +373,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 onClick={() => {
                   setMode(tab.id);
                   setErrorMsg(null);
+                  setInfoMsg(null);
                   setTouched({});
                 }}
                 className={`min-h-[36px] rounded-full px-2 py-1.5 text-xs font-medium transition-colors ${
@@ -331,7 +407,52 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           </div>
         ) : null}
 
-        <form onSubmit={(e) => void handleSubmit(e)} className="mt-4 space-y-3">
+        {mode === 'login' || mode === 'register' ? (
+          <div className="mt-4 flex flex-col gap-3">
+            <button
+              type="button"
+              data-testid="google-oauth-button"
+              onClick={handleGoogleContinue}
+              className="flex min-h-[42px] w-full items-center justify-center gap-2.5 rounded-full border border-[#D6CEC0] bg-white px-4 py-2 text-xs font-semibold text-[#1C1917] shadow-sm transition-colors hover:border-[#15803D] hover:bg-[#F0FDF4]"
+            >
+              <svg
+                aria-hidden="true"
+                className="h-4 w-4 shrink-0"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  fill="#4285F4"
+                  d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
+                />
+                <path
+                  fill="#34A853"
+                  d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
+                />
+                <path
+                  fill="#FBBC05"
+                  d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
+                />
+                <path
+                  fill="#EA4335"
+                  d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
+                />
+              </svg>
+              <span>
+                {mode === 'register'
+                  ? 'Sign up with Google'
+                  : 'Sign in with Google'}
+              </span>
+            </button>
+
+            <div className="flex items-center gap-2 text-[11px] text-[#57534E]">
+              <span className="h-px flex-1 bg-[#E6E0D5]" />
+              <span>or continue with verified email</span>
+              <span className="h-px flex-1 bg-[#E6E0D5]" />
+            </div>
+          </div>
+        ) : null}
+
+        <form onSubmit={(e) => void handleSubmit(e)} className="mt-3 space-y-3">
           {mode === 'register' ? (
             <div className="flex flex-col gap-1">
               <label
@@ -370,7 +491,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   onBlur={() => markTouched('email')}
                   aria-invalid={emailInvalid}
                   aria-describedby={emailInvalid ? 'auth-email-error' : undefined}
-                  placeholder="founder@brand.com"
+                  placeholder="founder@yourcompany.com"
                   className={`min-h-[40px] w-full rounded-xl border bg-[#FAF7F2] py-2 pl-9 pr-3.5 text-xs text-[#1C1917] placeholder-[#6E6A63] focus:bg-white focus:outline-none ${
                     emailInvalid
                       ? 'border-[#B91C1C]'
@@ -514,7 +635,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 : mode === 'register'
                 ? 'Create Account & Workspace'
                 : mode === 'verify_email'
-                ? 'Verify Email'
+                ? 'Verify & Sign In'
                 : mode === 'reset_request'
                 ? 'Request Reset Token'
                 : mode === 'reset_confirm'
@@ -534,7 +655,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             >
               Already have a reset token? Enter it here
             </button>
-          ) : mode === 'login' && currentUserEmail ? (
+          ) : mode === 'login' ? (
             <button
               type="button"
               onClick={() => {

@@ -5,6 +5,12 @@ from __future__ import annotations
 from sqlalchemy import Engine, inspect, text
 
 MIGRATION_VERSION = "002_saas_multi_tenant_auth_billing"
+MIGRATION_VERSION_003 = "003_google_oauth_identity"
+
+_LEGACY_USER_COLUMN_DEFAULTS = {
+    "auth_provider": "VARCHAR(32) NOT NULL DEFAULT 'password'",
+    "google_sub": "VARCHAR(255)",
+}
 
 _LEGACY_JOB_COLUMN_DEFAULTS = {
     "user_id": "CHAR(36)",
@@ -171,6 +177,10 @@ def run_migrations(engine: Engine, metadata) -> None:
         )
 
         tables = set(inspector.get_table_names())
+        if "users" in tables:
+            user_cols = {c["name"] for c in inspector.get_columns("users")}
+            _add_missing_columns(conn, "users", user_cols, _LEGACY_USER_COLUMN_DEFAULTS, dialect)
+
         if "workspaces" in tables:
             ws_cols = {c["name"] for c in inspector.get_columns("workspaces")}
             _add_missing_columns(
@@ -225,6 +235,13 @@ def run_migrations(engine: Engine, metadata) -> None:
                     "ON credit_ledger (workspace_id, created_at DESC)"
                 )
             )
+            if "users" in tables:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub_unique "
+                        "ON users (google_sub) WHERE google_sub IS NOT NULL"
+                    )
+                )
 
         already = conn.execute(
             text("SELECT version FROM schema_migrations WHERE version = :v"),
@@ -234,4 +251,13 @@ def run_migrations(engine: Engine, metadata) -> None:
             conn.execute(
                 text("INSERT INTO schema_migrations (version) VALUES (:v)"),
                 {"v": MIGRATION_VERSION},
+            )
+        already_003 = conn.execute(
+            text("SELECT version FROM schema_migrations WHERE version = :v"),
+            {"v": MIGRATION_VERSION_003},
+        ).fetchone()
+        if not already_003:
+            conn.execute(
+                text("INSERT INTO schema_migrations (version) VALUES (:v)"),
+                {"v": MIGRATION_VERSION_003},
             )

@@ -3,7 +3,7 @@
 **Project:** Localized AI Video Ad Pipeline (Non-English D2C SaaS)  
 **Current Phase:** Phase 5 Independent Security & Quality Audit Complete (`/security-and-quality-audit` Verified)  
 **Last Updated:** 2026-11-19  
-**Latest Verified Code State:** Commit `c5628f0` + Creamy White / Green UI/UX refresh + Audit Hardening (`AUDIT-008`–`AUDIT-013` fixed & verified)  
+**Latest Verified Code State:** Commit `9bbcf43` + Google OAuth Sign-In/Sign-Up + Strict Fake-Email Blocking & Verification Gate + Main-Menu Custom Video Prompt  
 
 ---
 
@@ -24,21 +24,26 @@
   - Updated [docs/audit/AUDIT_REPORT.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/docs/audit/AUDIT_REPORT.md) with independent findings `AUDIT-008`–`AUDIT-015` (**0 open Critical, 0 open High, 0 open Medium**; 2 Low/Operational items documented).
   - Hardened Studio BFF ([serverStore.ts](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/apps/studio/src/lib/serverStore.ts), all 10 mutating routes, streaming media proxies, and `next.config.mjs`): stripped raw `access_token`/`refresh_token` from auth JSON (`HttpOnly` cookies preserved), enforced same-origin CSRF checks (`403` on cross-site/missing-Origin cookie mutations), validated dynamic UUID params, streamed MP4/asset responses with MIME whitelist + `nosniff` + sandbox headers, and added strict `Content-Security-Policy` & production `Strict-Transport-Security`.
   - Hardened FastAPI Worker (`services/worker/app/security.py`, `services/worker/app/main.py`): added bounded key eviction (`max_keys=10_000`) to `SlidingWindowRateLimiter`, enforced per-user rate limits on workspace create (`20/min`), member invites (`20/min`), and asset uploads (`30/min`), sanitized multipart `Content-Type` header encoding, and capped asset listings at 100 items.
+- **Google OAuth Sign-In/Sign-Up, Fake-Email Blocking & Main-Menu Custom Video Prompt Complete & Verified:**
+  - Enforced real-email onboarding outside test mode: `validate_registration_email` blocks disposable/placeholder domains (`mailinator.com`, `yopmail.com`, `example.com`, `.invalid`, etc.), `effective_require_email_verification` defaults `True` outside `APP_ENV=test`, unverified logins return `403`, and dev tokens stay suppressed unless `EXPOSE_DEV_AUTH_TOKENS=true` (added stdlib `smtplib` verification sender when `SMTP_*` is configured).
+  - Implemented real Google OAuth 2.0 Authorization Code + PKCE S256 (`GET /v1/auth/providers`, `GET /v1/auth/google/start`, `POST /v1/auth/google/callback`, plus BFF `/api/v1/auth/google/start` & `/callback` routes, `auth_provider` + `google_sub` schema & `003_google_oauth_identity.sql` migration, and CSP `form-action` allowance for `https://accounts.google.com`). When `GOOGLE_OAUTH_CLIENT_ID`/`GOOGLE_OAUTH_CLIENT_SECRET` are unset locally, UI surfaces an honest configuration alert without simulating authentication.
+  - Promoted **`Custom Video Prompt`** (`#custom-prompt-input` -> `custom_props.veoPrompt`), `Promo Tag`, `Original Price`, `Opening Hook`, `Captions & Highlight Words`, and `Bottom Button CTA` directly onto the main `Create Video Ad` menu in `ProductScraperPanel.tsx`, removing the hidden `Customize script, captions & promo` dropdown while preserving `veo_prompt` end-to-end across generation and job retry.
 - **Automated Verification:**
-  - `services/worker`: `ruff check .` -> `All checks passed!`; `pytest -v` -> **`28 passed, 1 warning`** (after final Python security edits).
+  - `services/worker`: `ruff check .` -> `All checks passed!`; `pytest -v` -> **`29 passed, 1 warning`** (covering disposable/fake email blocking, unverified login blocking, verification session issuance, Google OAuth PKCE S256 + CSRF state validation + account upsert, and `veoPrompt` propagation).
   - `packages/remotion`: `npm run verify:remotion` -> exit `0` (`tsc --noEmit` + `eslint --max-warnings 0`).
-  - `apps/studio`: `npm run verify:studio` -> exit `0` (`tsc --noEmit` + `eslint --max-warnings 0` + **`7/7` node tests** + clean Next.js `16.4.6` Turbopack `next build`).
+  - `apps/studio`: `npm run verify:studio` -> exit `0` (`tsc --noEmit` + `eslint --max-warnings 0` + **`8/8` node tests** + clean Next.js `16.4.6` Turbopack `next build`).
   - `npm audit --omit=dev` -> `found 0 vulnerabilities` (6 moderate dev-only `minimatch` advisories remain in ESLint tooling).
 - **Live Browser Verification (`http://127.0.0.1:3000`, `NODE_ENV=production`):**
-  - Multi-breakpoint verification (`1280x800`, `768x1024`, `375x812`, `320x568`) confirmed creamy-white `#FAF7F2`, green rounded `#15803D` pills, progressive disclosure, `onBlur` validation, zero horizontal overflow, and unclipped Nastaliq highlights.
+  - Multi-breakpoint verification (`1280x800`, `768x1024`, `375x812`, `320x568`) confirmed creamy-white `#FAF7F2`, green rounded `#15803D` pills, `onBlur` validation, zero horizontal overflow, and unclipped Nastaliq highlights.
   - Post-audit production CSP/CSRF/HttpOnly check (`1280x800`) confirmed `0` CSP violations, `0` console/page/hydration errors, `0` HTTP `>=500` responses, raw tokens stripped from `POST /api/v1/auth/register` (`HTTP 201`), Remotion playback, same-origin `POST /api/v1/videos/generate` (`HTTP 202`), streamed `GET /api/v1/renders/[jobId]` (`HTTP 200`, `77,386` bytes, `video/mp4`, `nosniff`), and Billing ledger (`2 Credits`, `3 transactions`).
+  - Post-OAuth & main-menu verification (`1280x800`, `APP_ENV=development` with `REQUIRE_EMAIL_VERIFICATION=true`): confirmed `Sign in with Google` / `Sign up with Google` button (`data-testid="google-oauth-button"`) + honest missing-client-creds error, `HTTP 400` rejection of `fake@mailinator.com` and `bot@example.com`, `HTTP 403` rejection of unverified login before email verification, immediate sign-in on `POST /api/v1/auth/verify-email`, direct visibility of `#custom-prompt-input`, `#hook-text-input`, `#cta-text-input`, `Promo Tag`, and `Original Price` on the main menu (no dropdown toggle present), and `HTTP 202` -> `COMPLETED` render carrying `veo_prompt` (`0` console/page/hydration/CSP errors, `0` HTTP `>=500` responses).
 
 ## Next
-- Commit and push all verified UI/UX + security audit changes on `main` (`docs/DESIGN.md`, `apps/studio/*`, `services/worker/*`, `docs/audit/AUDIT_REPORT.md`, `docs/STATUS.md`) alongside existing local commits when ready.
-- Provision buyer cloud credentials (`DATABASE_URL` Postgres 15+, `GCP_PROJECT_ID`/`GCS_BUCKET`/ADC, live `STRIPE_*` keys, transactional SMTP) and run final cloud live smoke test (`Phase 6`).
+- Commit and push all verified changes on `main` (`services/worker/*`, `apps/studio/*`, `schema.sql`, `.env.example`, `docs/DESIGN.md`, `docs/STATUS.md`) when ready.
+- Provision buyer cloud credentials (`DATABASE_URL` Postgres 15+, `GCP_PROJECT_ID`/`GCS_BUCKET`/ADC, live `STRIPE_*` keys, `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET`, transactional `SMTP_*` credentials) and run final cloud live smoke test (`Phase 6`).
 
 ## Known Gaps / Deferred Blockers
-1. **External Cloud Live Smoke Tests:** Vertex AI Veo 3.1, Google Cloud TTS, live Stripe webhooks, and Supabase Postgres RLS policy execution were tested via SQL/HTTP mocks, local SQLite, and local FFmpeg binaries (live buyer cloud accounts not present in workspace).
+1. **External Cloud Live Smoke Tests & Buyer OAuth Credentials:** Vertex AI Veo 3.1, Google Cloud TTS, live Stripe webhooks, Google OAuth 2.0 client consent exchange (`GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET`), transactional `SMTP_*`, and Supabase Postgres RLS policy execution were verified via mocks/SQLite/local binaries; live buyer accounts/secrets are still needed before production launch.
 2. **`BUG-010` (Transactional Email Transport):** Email verification and password reset tokens are suppressed cleanly in production API responses (`APP_ENV=production`) and require wiring to a buyer SMTP/email provider (e.g. Resend/Postmark) for self-serve onboarding.
 3. **Python Dependency CVE Scan (`pip-audit`):** Not completed in this pass; keep scheduled `pip-audit` and `npm audit` gates active in CI before production releases.
 

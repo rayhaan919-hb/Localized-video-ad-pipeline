@@ -8,11 +8,15 @@ import hmac
 import json
 import re
 import secrets
+import smtplib
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from typing import Any
+from urllib.parse import urlencode
 
+import httpx
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -31,10 +35,41 @@ from app.security import get_client_ip, log_audit_event
 
 ACCESS_COOKIE_NAME = "lva_access_token"
 REFRESH_COOKIE_NAME = "lva_refresh_token"
+OAUTH_STATE_COOKIE_NAME = "lva_oauth_state"
 
 _PBKDF2_ITERATIONS = 260_000
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _ROLE_RANK = {"member": 1, "admin": 2, "owner": 3}
+
+_BLOCKED_EMAIL_DOMAINS = frozenset(
+    {
+        "mailinator.com",
+        "guerrillamail.com",
+        "guerrillamail.org",
+        "10minutemail.com",
+        "tempmail.com",
+        "temp-mail.org",
+        "yopmail.com",
+        "trashmail.com",
+        "sharklasers.com",
+        "throwaway.email",
+        "fakeinbox.com",
+        "dispostable.com",
+        "getnada.com",
+        "maildrop.cc",
+        "burnermail.io",
+        "mailnesia.com",
+        "mohmal.com",
+        "example.com",
+        "example.org",
+        "example.net",
+        "test.com",
+        "fake.com",
+        "invalid.com",
+        "localhost",
+    }
+)
+_BLOCKED_EMAIL_TLDS = (".invalid", ".local", ".test", ".localhost", ".example")
 
 # Constant dummy hash for timing equalization when an email does not exist.
 _DUMMY_PASSWORD_HASH = (
@@ -56,6 +91,18 @@ class AccountLockedError(AuthError):
 
 class InvalidCredentialsError(AuthError):
     """Raised for bad email/password or invalid tokens."""
+
+
+class EmailNotVerifiedError(AuthError):
+    """Raised when login is attempted prior to email address verification."""
+
+
+class GoogleOAuthError(AuthError):
+    """Raised when Google OAuth state, exchange, or identity validation fails."""
+
+
+class GoogleOAuthConfigError(GoogleOAuthError):
+    """Raised when Google OAuth client credentials are not configured."""
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -197,6 +244,50 @@ def normalize_email(email: str) -> str:
     return cleaned
 
 
+def validate_registration_email(email: str) -> str:
+    """Validate format and reject fake or disposable email domains outside unit-test mode."""
+    norm_email = normalize_email(email)
+    if settings.effective_app_env == "test":
+        return norm_email
+    domain = norm_email.rsplit("@", 1)[-1]
+    if (
+        domain in _BLOCKED_EMAIL_DOMAINS
+        or any(domain.endswith(f".{blocked}") for blocked in _BLOCKED_EMAIL_DOMAINS)
+        or any(domain.endswith(tld) for tld in _BLOCKED_EMAIL_TLDS)
+    ):
+        raise ValueError(
+            "Disposable or fake email addresses are not allowed. "
+            "Use a real email address or continue with Google."
+        )
+    return norm_email
+
+
+def send_verification_email(to_email: str, token: str) -> bool:
+    """Deliver a real verification email when SMTP is configured."""
+    if not settings.is_smtp_configured:
+        return False
+    base_url = settings.effective_frontend_app_url or "http://localhost:3000"
+    verify_url = f"{base_url}/?verify_token={token}"
+    msg = EmailMessage()
+    msg["Subject"] = "Verify your Localized Video Ad Studio email"
+    msg["From"] = settings.effective_smtp_from_email
+    msg["To"] = to_email
+    msg.set_content(
+        "Welcome to Localized Video Ad Studio!\n\n"
+        f"Click to verify your email address:\n{verify_url}\n\n"
+        f"Or paste this verification code in the app:\n{token}\n"
+    )
+    with smtplib.SMTP(
+        settings.effective_smtp_host, settings.effective_smtp_port, timeout=15
+    ) as server:
+        if settings.effective_smtp_use_tls:
+            server.starttls()
+        if settings.effective_smtp_user:
+            server.login(settings.effective_smtp_user, settings.effective_smtp_password)
+        server.send_message(msg)
+    return True
+
+
 def register_user(
     session: Session,
     *,
@@ -205,7 +296,7 @@ def register_user(
     full_name: str = "",
 ) -> tuple[User, Workspace, str]:
     """Register a new SaaS user, create their isolated workspace, and mint verify token."""
-    norm_email = normalize_email(email)
+    norm_email = validate_registration_email(email)
     existing = session.scalar(select(User).where(User.email == norm_email))
     if existing is not None:
         raise EmailAlreadyRegisteredError("An account with this email already exists.")
@@ -219,6 +310,7 @@ def register_user(
         password_hash=pw_hash,
         full_name=(full_name.strip() or norm_email.split("@")[0])[:200],
         is_email_verified=False,
+        auth_provider="password",
         email_verify_token_hash=sha256_token(verify_raw),
         email_verify_expires_at=now + timedelta(seconds=int(settings.EMAIL_VERIFY_TTL_SECONDS)),
         failed_login_attempts=0,
@@ -325,6 +417,12 @@ def authenticate_user(session: Session, *, email: str, password: str) -> User:
     user.locked_until = None
     user.updated_at = now
     session.flush()
+
+    if settings.effective_require_email_verification and not user.is_email_verified:
+        raise EmailNotVerifiedError(
+            "Please verify your email address before signing in, or continue with Google."
+        )
+
     return user
 
 
@@ -541,3 +639,223 @@ def require_workspace_role(
         )
 
     return workspace, membership
+
+
+def build_google_oauth_start(mode: str = "login") -> tuple[str, str]:
+    """Build a Google OAuth 2.0 Authorization Code + PKCE URL and signed state cookie."""
+    if not settings.is_google_oauth_configured:
+        raise GoogleOAuthConfigError(
+            "Google Sign-In requires GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET."
+        )
+    secret = settings.effective_auth_jwt_secret
+    if not secret:
+        raise GoogleOAuthConfigError("AUTH_JWT_SECRET is required for OAuth state signing.")
+
+    state = secrets.token_urlsafe(32)
+    code_verifier = secrets.token_urlsafe(48)
+    code_challenge = _b64url_encode(hashlib.sha256(code_verifier.encode("ascii")).digest())
+    clean_mode = "register" if mode == "register" else "login"
+
+    payload_dict = {
+        "state": state,
+        "code_verifier": code_verifier,
+        "mode": clean_mode,
+        "exp": int(time.time()) + 600,
+    }
+    payload_b64 = _b64url_encode(
+        json.dumps(payload_dict, separators=(",", ":")).encode("utf-8")
+    )
+    sig_hex = hmac.new(
+        secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    signed_cookie = f"{payload_b64}.{sig_hex}"
+
+    query = urlencode(
+        {
+            "client_id": settings.effective_google_oauth_client_id,
+            "redirect_uri": settings.effective_google_oauth_redirect_uri,
+            "response_type": "code",
+            "scope": "openid email profile",
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "prompt": "select_account",
+        }
+    )
+    return f"https://accounts.google.com/o/oauth2/v2/auth?{query}", signed_cookie
+
+
+def verify_google_oauth_state_cookie(cookie_value: str, expected_state: str) -> dict[str, Any]:
+    """Verify signed lva_oauth_state cookie integrity, expiry, and matching CSRF state."""
+    secret = settings.effective_auth_jwt_secret
+    if not secret or not cookie_value or "." not in cookie_value or not expected_state:
+        raise GoogleOAuthError("Missing or invalid OAuth state cookie.")
+
+    payload_b64, sig_hex = cookie_value.strip().split(".", 1)
+    expected_sig = hmac.new(
+        secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(sig_hex.strip(), expected_sig):
+        raise GoogleOAuthError("Invalid OAuth state signature.")
+
+    try:
+        payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+    except Exception as exc:
+        raise GoogleOAuthError("Malformed OAuth state payload.") from exc
+
+    exp = int(payload.get("exp") or 0)
+    if exp <= int(time.time()):
+        raise GoogleOAuthError("OAuth login session expired. Please try again.")
+
+    stored_state = str(payload.get("state") or "")
+    if not stored_state or not hmac.compare_digest(stored_state, expected_state.strip()):
+        raise GoogleOAuthError("OAuth CSRF state mismatch.")
+    return payload
+
+
+def exchange_google_oauth_code(*, code: str, code_verifier: str) -> dict[str, Any]:
+    """Exchange Google authorization code for verified OpenID Connect user identity."""
+    if not settings.is_google_oauth_configured:
+        raise GoogleOAuthConfigError("Google OAuth client credentials are not configured.")
+
+    client_id = settings.effective_google_oauth_client_id
+    client_secret = settings.effective_google_oauth_client_secret
+    redirect_uri = settings.effective_google_oauth_redirect_uri
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            token_resp = client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": code,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "redirect_uri": redirect_uri,
+                    "grant_type": "authorization_code",
+                    "code_verifier": code_verifier,
+                },
+            )
+            if token_resp.status_code != 200:
+                raise GoogleOAuthError(
+                    f"Google token exchange failed ({token_resp.status_code})."
+                )
+            token_data = token_resp.json()
+            access_token = str(token_data.get("access_token") or "").strip()
+            id_token = str(token_data.get("id_token") or "").strip()
+            if not access_token:
+                raise GoogleOAuthError("Google token response lacked access_token.")
+
+            id_claims: dict[str, Any] = {}
+            if id_token and len(id_token.split(".")) == 3:
+                try:
+                    id_claims = json.loads(_b64url_decode(id_token.split(".")[1]).decode("utf-8"))
+                except Exception as exc:
+                    raise GoogleOAuthError("Malformed Google id_token payload.") from exc
+                if str(id_claims.get("aud") or "") != client_id:
+                    raise GoogleOAuthError("Google id_token audience mismatch.")
+                if str(id_claims.get("iss") or "") not in (
+                    "https://accounts.google.com",
+                    "accounts.google.com",
+                ):
+                    raise GoogleOAuthError("Google id_token issuer mismatch.")
+
+            info_resp = client.get(
+                "https://openidconnect.googleapis.com/v1/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if info_resp.status_code != 200:
+                raise GoogleOAuthError("Failed to fetch verified Google user profile.")
+            userinfo = info_resp.json()
+    except GoogleOAuthError:
+        raise
+    except httpx.HTTPError as exc:
+        raise GoogleOAuthError(f"Could not contact Google OAuth endpoints: {exc}") from exc
+
+    sub = str(userinfo.get("sub") or "").strip()
+    raw_email = str(userinfo.get("email") or "").strip()
+    email_verified = userinfo.get("email_verified") is True
+    if not sub or not raw_email:
+        raise GoogleOAuthError("Google account did not provide required subject/email.")
+    if not email_verified:
+        raise GoogleOAuthError("Your Google account email is not verified.")
+    if id_claims.get("sub") and not hmac.compare_digest(str(id_claims["sub"]), sub):
+        raise GoogleOAuthError("Google identity subject mismatch.")
+
+    return {
+        "sub": sub,
+        "email": normalize_email(raw_email),
+        "name": str(userinfo.get("name") or "").strip()[:200],
+    }
+
+
+def upsert_google_user(
+    session: Session,
+    *,
+    google_sub: str,
+    email: str,
+    full_name: str = "",
+) -> tuple[User, Workspace, bool]:
+    """Sign in existing user (linking google_sub) or create a verified Google SaaS user."""
+    norm_email = normalize_email(email)
+    user = session.scalar(select(User).where(User.google_sub == google_sub))
+    if user is None:
+        user = session.scalar(select(User).where(User.email == norm_email))
+
+    now = utcnow()
+    if user is not None:
+        user.google_sub = google_sub
+        user.is_email_verified = True
+        user.email_verify_token_hash = None
+        user.email_verify_expires_at = None
+        if user.auth_provider == "password":
+            user.auth_provider = "google+password"
+        elif user.auth_provider not in ("google", "google+password"):
+            user.auth_provider = "google"
+        if not user.full_name and full_name:
+            user.full_name = full_name[:200]
+        user.updated_at = now
+        session.flush()
+
+        primary_ws = session.scalar(
+            select(Workspace)
+            .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
+            .where(WorkspaceMember.user_id == user.id)
+            .order_by(Workspace.created_at.asc())
+        )
+        if primary_ws is None:
+            ws_label = f"{user.full_name}'s Workspace" if user.full_name else "My Workspace"
+            primary_ws = create_workspace_for_user(
+                session,
+                owner_id=user.id,
+                name=ws_label,
+                grant_initial_promo=False,
+                promo_credits=0,
+            )
+        return user, primary_ws, False
+
+    display_name = (full_name.strip() or norm_email.split("@")[0])[:200]
+    user = User(
+        id=str(uuid.uuid4()),
+        email=norm_email,
+        password_hash=hash_password(secrets.token_urlsafe(32)),
+        full_name=display_name,
+        is_email_verified=True,
+        auth_provider="google",
+        google_sub=google_sub,
+        failed_login_attempts=0,
+        is_admin=False,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(user)
+    session.flush()
+
+    workspace_label = f"{display_name}'s Workspace" if display_name else "My Workspace"
+    workspace = create_workspace_for_user(
+        session,
+        owner_id=user.id,
+        name=workspace_label,
+        grant_initial_promo=settings.effective_initial_promo_credits > 0,
+        promo_credits=settings.effective_initial_promo_credits,
+    )
+    return user, workspace, True

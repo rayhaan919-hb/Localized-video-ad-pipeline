@@ -16,6 +16,7 @@ from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -1061,3 +1062,184 @@ def test_rate_limiter_eviction_member_limits_and_multipart_sanitization(
     listed = client.get(f"/v1/workspaces/{ws_id}/assets", headers=headers)
     assert listed.status_code == 200
     assert len(listed.json()["assets"]) == 100
+
+
+def test_fake_email_blocked_verification_enforced_and_google_oauth_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block fake emails outside test mode, enforce verification, and verify Google OAuth."""
+    monkeypatch.setenv("APP_ENV", "development")
+    init_db()
+
+    with TestClient(app) as client:
+        # 1. Disposable / example.com fake emails are blocked in non-test environments
+        for fake_email in (
+            "fake@mailinator.com",
+            "bot@example.com",
+            "throwaway@yopmail.com",
+            "test@test.invalid",
+        ):
+            blocked = client.post(
+                "/v1/auth/register",
+                json={"email": fake_email, "password": "Password123!", "full_name": "Fake"},
+            )
+            assert blocked.status_code == 400, (
+                f"Expected 400 for {fake_email}, got {blocked.status_code}"
+            )
+
+        # 2. Providers reflect strict verification + unconfigured Google OAuth honestly
+        providers_off = client.get("/v1/auth/providers")
+        assert providers_off.status_code == 200
+        assert providers_off.json() == {
+            "google_enabled": False,
+            "email_verification_required": True,
+            "smtp_configured": False,
+        }
+
+        unconfigured_start = client.get("/v1/auth/google/start")
+        assert unconfigured_start.status_code == 503
+
+        # 3. Registration outside test mode must not issue session or leak token by default
+        reg_hidden = client.post(
+            "/v1/auth/register",
+            json={
+                "email": "pending@zayna-brand.pk",
+                "password": "Password123!",
+                "full_name": "Pending User",
+            },
+        )
+        assert reg_hidden.status_code == 201
+        hidden_body = reg_hidden.json()
+        assert hidden_body["verification_required"] is True
+        assert "access_token" not in hidden_body
+        assert "verify_email_token" not in hidden_body
+
+        # Unverified account cannot sign in
+        unverified_login = client.post(
+            "/v1/auth/login",
+            json={"email": "pending@zayna-brand.pk", "password": "Password123!"},
+        )
+        assert unverified_login.status_code == 403
+
+        # 4. Explicit dev token exposure allows verifying and immediately signing in
+        rate_limiter.reset()
+        monkeypatch.setenv("EXPOSE_DEV_AUTH_TOKENS", "true")
+        reg_dev = client.post(
+            "/v1/auth/register",
+            json={
+                "email": "founder@zayna-brand.pk",
+                "password": "Password123!",
+                "full_name": "Founder",
+            },
+        )
+        assert reg_dev.status_code == 201
+        verify_token = reg_dev.json()["verify_email_token"]
+
+        verified = client.post("/v1/auth/verify-email", json={"token": verify_token})
+        assert verified.status_code == 200
+        verified_data = verified.json()
+        assert verified_data["verified"] is True
+        assert verified_data["user"]["is_email_verified"] is True
+        assert verified_data["access_token"]
+
+        # 5. Google OAuth 2.0 + PKCE S256 start, CSRF state validation, and callback upsert
+        rate_limiter.reset()
+        monkeypatch.setenv(
+            "GOOGLE_OAUTH_CLIENT_ID",
+            "test-google-client.apps.googleusercontent.com",
+        )
+        monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_SECRET", "test-google-secret")
+
+        providers_on = client.get("/v1/auth/providers")
+        assert providers_on.status_code == 200
+        assert providers_on.json()["google_enabled"] is True
+
+        oauth_start = client.get("/v1/auth/google/start?mode=register")
+        assert oauth_start.status_code == 200
+        auth_url = oauth_start.json()["authorization_url"]
+        parsed = urlparse(auth_url)
+        query = parse_qs(parsed.query)
+        assert auth_url.startswith("https://accounts.google.com/o/oauth2/v2/auth")
+        assert query["code_challenge_method"] == ["S256"]
+        oauth_state = query["state"][0]
+        assert oauth_start.cookies.get("lva_oauth_state")
+
+        # Mismatched CSRF state is rejected (and clears oauth state cookie)
+        bad_state_cb = client.post(
+            "/v1/auth/google/callback",
+            json={"code": "fake-code", "state": "wrong-state"},
+        )
+        assert bad_state_cb.status_code == 400
+
+        # Re-start Google OAuth to obtain a fresh signed state cookie
+        oauth_start = client.get("/v1/auth/google/start?mode=register")
+        assert oauth_start.status_code == 200
+        oauth_state = parse_qs(urlparse(oauth_start.json()["authorization_url"]).query)["state"][0]
+
+        # Valid code exchange creates verified Google user + primary workspace with promo credits
+        with patch(
+            "app.main.exchange_google_oauth_code",
+            return_value={
+                "sub": "google-sub-123456",
+                "email": "ayesha@zayna-brand.pk",
+                "name": "Ayesha Google",
+                "email_verified": True,
+            },
+        ):
+            good_cb = client.post(
+                "/v1/auth/google/callback",
+                json={"code": "google-auth-code", "state": oauth_state},
+            )
+            assert good_cb.status_code == 200
+            cb_data = good_cb.json()
+            assert cb_data["is_new_user"] is True
+            assert cb_data["user"]["auth_provider"] == "google"
+            assert cb_data["user"]["is_email_verified"] is True
+            ws_id = cb_data["primary_workspace_id"]
+
+            # Main-menu Custom Video Prompt (veoPrompt) flows into generated script_json
+            custom_veo_prompt = "Orbital macro shot with warm sunlight and silk fabric reflections."
+            gen_res = client.post(
+                "/v1/videos/generate",
+                headers={"Authorization": f"Bearer {cb_data['access_token']}"},
+                json={
+                    "workspace_id": ws_id,
+                    "product_url": "https://luminabotanics.com/products/glow-niacinamide-serum",
+                    "target_language": "en",
+                    "ad_angle": "problem_solution",
+                    "aspect_ratio": "9:16",
+                    "duration_seconds": 8,
+                    "custom_props": {
+                        "brandName": "Zayna",
+                        "productTitle": "Glow Serum",
+                        "priceDisplay": "PKR 2,499",
+                        "hookText": "Real glow in 7 days",
+                        "ctaText": "Shop Now",
+                        "captions": [],
+                        "veoPrompt": custom_veo_prompt,
+                    },
+                },
+            )
+            assert gen_res.status_code in (200, 201, 202), gen_res.text
+            assert gen_res.json()["script_json"]["veo_prompt"] == custom_veo_prompt
+
+        # Repeating Google login for same sub reuses account (is_new_user=False)
+        oauth_start_2 = client.get("/v1/auth/google/start?mode=login")
+        oauth_query_2 = parse_qs(urlparse(oauth_start_2.json()["authorization_url"]).query)
+        oauth_state_2 = oauth_query_2["state"][0]
+        with patch(
+            "app.main.exchange_google_oauth_code",
+            return_value={
+                "sub": "google-sub-123456",
+                "email": "ayesha@zayna-brand.pk",
+                "name": "Ayesha Google",
+                "email_verified": True,
+            },
+        ):
+            second_cb = client.post(
+                "/v1/auth/google/callback",
+                json={"code": "google-auth-code-2", "state": oauth_state_2},
+            )
+            assert second_cb.status_code == 200
+            assert second_cb.json()["is_new_user"] is False
+            assert second_cb.json()["primary_workspace_id"] == ws_id

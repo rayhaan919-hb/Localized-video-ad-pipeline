@@ -18,7 +18,7 @@ Calm editorial D2C studio—warm creamy-white `#FAF7F2` canvas, pure white round
 2. **Tariq — Creative Producer (Performance Agency Managing Multiple Brand Workspaces):** Operates across multiple client workspaces with strict tenant isolation, checks active job progress and refunds failed renders, and buys credit packs via Stripe when agency balances dip.
 
 ### Top 3 User Tasks
-1. **Create & Render a Localized Product Video Ad:** Paste a storefront URL (or confirm brand, price, product title, and image) -> review live preview & captions -> optionally customize script/captions inside the collapsible drawer -> generate & download a rendered MP4.
+1. **Create & Render a Localized Product Video Ad:** Paste a storefront URL (or confirm brand, price, product title, and image) -> customize Custom Video Prompt, Opening Hook, Captions, Promo Tag, Original Price, and Bottom Button CTA directly on the main menu -> review live preview -> generate & download a rendered MP4.
 2. **Switch Workspace & Manage Credits:** Select or create an isolated workspace -> view credit balance at a glance -> purchase Stripe credit packs and review credit history when needed.
 3. **Track & Manage Rendered Videos:** Filter videos by status (`All`, `Completed`, `Active`, `Failed`) -> inspect live progress for active renders -> preview compositions, download signed MP4s, copy download links, cancel active renders for automatic refund, or retry failed jobs.
 
@@ -35,12 +35,14 @@ Calm editorial D2C studio—warm creamy-white `#FAF7F2` canvas, pure white round
   - *Zero credits on Generate:* Primary CTA transitions cleanly to `0 Credits Remaining — Buy Credits` and opens `Credits & Billing`.
   - *Render failure:* Job card shows `Failed · Refunded` pill, refunds credit automatically, and offers `Retry`.
 
-### Flow B: Authentication, Verification & Password Recovery
-- **Happy Path:** Unauthenticated user lands -> `AuthModal` opens -> registers/signs in -> server sets HttpOnly session cookie + CSRF token -> modal closes cleanly.
+### Flow B: Authentication, Google OAuth, Verification & Password Recovery
+- **Happy Path:** Unauthenticated user lands -> `AuthModal` opens with prominent **Sign in with Google** / **Sign up with Google** (`OAuth 2.0 Authorization Code + PKCE S256`) and verified email/password registration -> after email verification or Google OAuth callback, server sets `HttpOnly` session cookies -> modal closes cleanly.
 - **Unhappy Paths:**
+  - *Fake or disposable email registration:* Disposable/placeholder domains (`mailinator.com`, `yopmail.com`, `example.com`) are rejected outside test mode (`HTTP 400`) with an inline `<p role="alert">` error.
+  - *Unverified email login:* Sign-in is gated (`HTTP 403`) until email verification completes, transitioning cleanly to `verify_email` mode (plus an amber `Verify` pill in the top bar if partially unverified).
+  - *Unconfigured Google OAuth:* Clicking `Sign in/up with Google` without `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` displays an honest configuration notice instead of faking login.
   - *Modal closed without signing in:* Warm amber banner in `<main>` provides a direct green `Sign In / Create Account` button.
   - *Invalid email or short password on blur:* Inline `<p role="alert">` message appears beneath the blurred field while preserving user input.
-  - *Unverified email:* Compact amber `Verify` pill in the top bar opens the verification view.
 
 ### Flow C: Credit Checkout & Credit History
 - **Happy Path:** User clicks green `Buy Credits` pill -> selects a server-verified credit pack -> clicks green checkout CTA -> completes Stripe Checkout -> returns to updated balance and credit history row.
@@ -54,7 +56,7 @@ Calm editorial D2C studio—warm creamy-white `#FAF7F2` canvas, pure white round
 | Area | Clutter Removed | User-Facing Result |
 | :--- | :--- | :--- |
 | Top Navigation | Removed technical `VEO 3.1 + REMOTION` tag, redundant `Renders X/Y` counter, and raw workspace hex IDs | Clean sticky `#FAF7F2` header with workspace switcher + `+ New`, Credits pill, green `Buy Credits` pill, Sync button, user chip |
-| Create Video Ad Panel (`372px` desktop) | Moved optional `Promo Tag`, `Compare-At Price`, `Opening Hook`, `Captions`, and `Bottom CTA` behind `Customize script, captions & promo`; removed repetitive telemetry footer and multi-line badge noise | Focused 4-field creation workflow above confirmation CTA while keeping 100% caption customization accessible in 1 click |
+| Create Video Ad Panel (`372px` desktop) | Removed repetitive telemetry footer and multi-line badge noise; eliminated hidden `Customize script, captions & promo` dropdown | Surfaced `Custom Video Prompt` (`veoPrompt`), `Promo Tag`, `Original Price`, `Opening Hook`, `Captions & Highlight Words`, and `Bottom Button CTA` directly on the main menu |
 | Live Preview Stage | Removed 4-box telemetry grid (`LINE HEIGHT`, `DIRECTION`), `Render Output & Storage` URI card, duplicate Generate button, and bottom draft bar | Immediate `9:16` / `16:9` Remotion Player alongside a concise 1-line summary bar and clean Urdu/RTL-safe Captions cards |
 | Recent Videos Gallery | Hid raw GCS/storage URI strings; showed 4-step pipeline tracker only while a video is actively rendering | Scannable white cards with semantic `rounded-full` status pills (`Completed`, `In Progress`, `Failed · Refunded`) and pill buttons |
 | Modals (`Auth` & `Credits & Billing`) | Removed raw workspace UUID banner and webhook jargon (`ATOMIC LEDGER`, `IDEMPOTENT WEBHOOK GRANTS`) | Spacious creamy-white / white `rounded-3xl` dialogs with pill buttons and horizontal-scroll-contained tables |
@@ -100,11 +102,11 @@ Calm editorial D2C studio—warm creamy-white `#FAF7F2` canvas, pure white round
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **StudioWorkspace** | Auth-check skeleton | Unauthenticated amber banner | Top `aria-live="polite"` banner | Empty queue + loaded draft | Creamy canvas, `372px` + `flex-1` stage | Unauthenticated gating |
 | **StudioHeader** | Spin/pulse credit pill | Single default workspace | Workspace error banner | Amber `Verify` pill | Active workspace, Credits pill, green `Buy Credits` pill | Disabled while syncing |
-| **ProductScraperPanel** | Warm cream skeleton | Calm empty draft + green template pill | `onBlur` `<p role="alert">` + banner | Drawer collapsed/expanded | Green active script/format pills + Generate pill | Locked when unconfirmed or 0 credits |
+| **ProductScraperPanel** | Warm cream skeleton | Calm empty draft + green template pill | `onBlur` `<p role="alert">` + banner | Custom Video Prompt + script/caption cards directly on main menu | Green active script/format pills + Generate pill | Locked when unconfirmed or 0 credits |
 | **RemotionPreviewStage** | Creamy-warm buffering box | Default localized preview loaded | Fallback image placeholder | Draft captions preview | Interactive Player + green `Download MP4` pill | Download hidden until complete |
 | **RenderQueueGallery** | Warm card skeletons | Calm empty box + green CTA pill | `#FEF2F2` / `#B91C1C` `Failed · Refunded` + `Retry` | Active 4-step `#15803D` bar | Selected card `#15803D` border + `MP4` green pill | Action buttons scoped to state |
 | **CreditCheckoutModal** | Skeleton ledger rows | Empty credit history card | Soft-red alert + `Retry` pill | Pending ledger rows | 3 white pack cards + green checkout pills + `overflow-x-auto` table | Prevent double checkout click |
-| **AuthModal** | Submitting spinner | Clean form inputs | `onBlur` `<p role="alert">` + API error box | Verify email / reset flow | Green pill CTA & clean auto-dismiss | Disabled while submitting |
+| **AuthModal** | Submitting spinner | Clean form inputs | `onBlur` `<p role="alert">` + API error box | Google OAuth / verify_email gate / reset flow | Green pill CTA & clean auto-dismiss | Disabled while submitting |
 
 ---
 

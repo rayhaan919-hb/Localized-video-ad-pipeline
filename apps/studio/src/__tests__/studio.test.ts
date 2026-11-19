@@ -253,3 +253,89 @@ test('BFF enforces same-origin CSRF checks, strips raw tokens, validates UUIDs, 
   assert.equal(nextConfigText.includes('Content-Security-Policy'), true);
   assert.equal(nextConfigText.includes('Strict-Transport-Security'), true);
 });
+
+test('Google OAuth & verification UI, BFF routes, and main-menu Custom Video Prompt stay wired', () => {
+  const cwdCandidate = path.join(process.cwd(), 'next.config.mjs');
+  const studioRoot = fs.existsSync(cwdCandidate)
+    ? process.cwd()
+    : path.join(process.cwd(), 'apps', 'studio');
+
+  const authModalText = fs.readFileSync(
+    path.join(studioRoot, 'src', 'components', 'AuthModal.tsx'),
+    'utf-8'
+  );
+  assert.equal(authModalText.includes('/api/v1/auth/google/start'), true);
+  assert.equal(authModalText.includes('data-testid="google-oauth-button"'), true);
+  assert.equal(authModalText.includes('Sign in with Google'), true);
+  assert.equal(authModalText.includes('Sign up with Google'), true);
+  assert.equal(authModalText.includes('verification_required'), true);
+
+  const googleStartRoute = fs.existsSync(
+    path.join(
+      studioRoot,
+      'src',
+      'app',
+      'api',
+      'v1',
+      'auth',
+      'google',
+      'start',
+      'route.ts'
+    )
+  );
+  const googleCallbackRoute = fs.existsSync(
+    path.join(
+      studioRoot,
+      'src',
+      'app',
+      'api',
+      'v1',
+      'auth',
+      'google',
+      'callback',
+      'route.ts'
+    )
+  );
+  assert.equal(googleStartRoute, true);
+  assert.equal(googleCallbackRoute, true);
+
+  const nextConfigText = fs.readFileSync(
+    path.join(studioRoot, 'next.config.mjs'),
+    'utf-8'
+  );
+  assert.equal(nextConfigText.includes('https://accounts.google.com'), true);
+
+  const scraperPanelText = fs.readFileSync(
+    path.join(studioRoot, 'src', 'components', 'ProductScraperPanel.tsx'),
+    'utf-8'
+  );
+  assert.equal(scraperPanelText.includes('id="custom-prompt-input"'), true);
+  assert.equal(scraperPanelText.includes('Custom Video Prompt'), true);
+  assert.equal(scraperPanelText.includes('id="hook-text-input"'), true);
+  assert.equal(scraperPanelText.includes('id="cta-text-input"'), true);
+  assert.equal(scraperPanelText.includes('showScriptEditor'), false);
+  assert.equal(scraperPanelText.includes('Customize script, captions'), false);
+
+  const studioWorkspaceText = fs.readFileSync(
+    path.join(studioRoot, 'src', 'components', 'StudioWorkspace.tsx'),
+    'utf-8'
+  );
+  assert.equal(studioWorkspaceText.includes('veoPrompt'), true);
+  assert.equal(studioWorkspaceText.includes('auth_error'), true);
+  assert.equal(studioWorkspaceText.includes('verify_token'), true);
+
+  const generateRouteText = fs.readFileSync(
+    path.join(
+      studioRoot,
+      'src',
+      'app',
+      'api',
+      'v1',
+      'videos',
+      'generate',
+      'route.ts'
+    ),
+    'utf-8'
+  );
+  assert.equal(generateRouteText.includes('veoPrompt'), true);
+});

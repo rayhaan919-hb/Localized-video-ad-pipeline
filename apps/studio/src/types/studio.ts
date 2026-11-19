@@ -34,6 +34,7 @@ export interface AuthUserSummary {
   id: string;
   email: string;
   full_name?: string | null;
+  auth_provider?: string;
   is_email_verified: boolean;
   is_admin: boolean;
   workspaces: WorkspaceSummary[];

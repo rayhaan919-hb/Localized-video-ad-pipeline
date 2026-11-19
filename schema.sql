@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   full_name TEXT NOT NULL DEFAULT '',
   is_email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+  auth_provider TEXT NOT NULL DEFAULT 'password',
+  google_sub TEXT UNIQUE,
   email_verify_token_hash TEXT,
   email_verify_expires_at TIMESTAMPTZ,
   password_reset_token_hash TEXT,

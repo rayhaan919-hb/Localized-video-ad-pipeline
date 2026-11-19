@@ -13,7 +13,7 @@ interface RouteContext {
   }>;
 }
 
-const ALLOWED_GET_PATHS = new Set(['me']);
+const ALLOWED_GET_PATHS = new Set(['me', 'providers']);
 const ALLOWED_POST_PATHS = new Set([
   'register',
   'login',

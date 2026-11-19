@@ -15,7 +15,7 @@ const nextConfig = {
       "frame-ancestors 'none'",
       "object-src 'none'",
       "base-uri 'self'",
-      "form-action 'self' https://checkout.stripe.com",
+      "form-action 'self' https://checkout.stripe.com https://accounts.google.com",
     ].join('; ');
 
     const securityHeaders = [

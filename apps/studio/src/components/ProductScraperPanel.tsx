@@ -3,7 +3,6 @@
 import React, { useRef, useState } from 'react';
 import {
   AlertTriangle,
-  ChevronDown,
   ImagePlus,
   PackageSearch,
   RotateCcw,
@@ -60,6 +59,8 @@ interface ProductScraperPanelProps {
   captions: CaptionSegment[];
   onChangeCaptionText: (index: number, text: string) => void;
   onChangeCaptionHighlight: (index: number, highlightWord: string) => void;
+  customPrompt: string;
+  onChangeCustomPrompt: (prompt: string) => void;
   isScraping: boolean;
   scrapeError: string | null;
   scrapeMetadata: ScrapedProductMetadata | null;
@@ -128,6 +129,8 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
   captions,
   onChangeCaptionText,
   onChangeCaptionHighlight,
+  customPrompt,
+  onChangeCustomPrompt,
   isScraping,
   scrapeError,
   scrapeMetadata,
@@ -146,7 +149,6 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
-  const [showScriptEditor, setShowScriptEditor] = useState(false);
 
   const markTouched = (field: string) =>
     setTouched((prev) => ({ ...prev, [field]: true }));
@@ -660,23 +662,28 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
                 ) : null}
               </div>
 
-              {/* Progressive Disclosure Toggle: Script, Captions & Promo */}
-              <button
-                type="button"
-                aria-expanded={showScriptEditor}
-                onClick={() => setShowScriptEditor((prev) => !prev)}
-                className="flex min-h-[40px] w-full items-center justify-between rounded-xl border border-[#E6E0D5] bg-[#FAF7F2] px-3.5 py-2 text-xs font-medium text-[#1C1917] transition-colors hover:border-[#D6CEC0] hover:bg-[#F4EFE6]"
-              >
-                <span>Customize script, captions &amp; promo</span>
-                <ChevronDown
-                  className={`h-4 w-4 text-[#57534E] transition-transform ${
-                    showScriptEditor ? 'rotate-180' : ''
-                  }`}
-                />
-              </button>
-
-              {showScriptEditor ? (
-                <div className="flex flex-col gap-3 rounded-xl border border-[#E6E0D5] bg-[#FAF7F2] p-3">
+              {/* Custom Video Prompt & Script Controls — always visible on main menu */}
+              <div className="flex flex-col gap-3 rounded-xl border border-[#E6E0D5] bg-[#FAF7F2] p-3.5">
+                <div>
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="custom-prompt-input"
+                      className="text-xs font-medium text-[#1C1917]"
+                    >
+                      Custom Video Prompt
+                    </label>
+                    <span className="text-[11px] text-[#78716C]">Optional</span>
+                  </div>
+                  <textarea
+                    id="custom-prompt-input"
+                    rows={3}
+                    maxLength={1500}
+                    value={customPrompt}
+                    onChange={(e) => onChangeCustomPrompt(e.target.value)}
+                    placeholder="Describe camera motion, lighting, scene mood, and visual pacing (sent directly to Veo)..."
+                    className="w-full rounded-xl border border-[#E6E0D5] bg-[#FFFFFF] px-3 py-2 text-xs text-[#1C1917] placeholder:text-[#A8A29E] focus:border-[#15803D] focus:outline-none"
+                  />
+                </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div className="flex flex-col gap-1">
                       <label
@@ -789,8 +796,7 @@ export const ProductScraperPanel: React.FC<ProductScraperPanelProps> = ({
                       className={`${scriptClassName} min-h-[36px] w-full rounded-xl border border-[#D6CEC0] bg-white px-3 py-1.5 text-xs text-[#1C1917] focus:border-[#15803D] focus:outline-none`}
                     />
                   </div>
-                </div>
-              ) : null}
+              </div>
 
               {/* Mandatory Confirmation */}
               <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-[#E6E0D5] bg-[#FAF7F2] p-3 text-xs text-[#1C1917]">

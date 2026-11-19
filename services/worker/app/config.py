@@ -167,6 +167,17 @@ class Settings(BaseSettings):
     STORAGE_ROOT: str = str(STORAGE_DIR)
     USE_REMOTION_CLI: bool = False
     DEFAULT_DURATION_SECONDS: float = 4.0
+    GOOGLE_OAUTH_CLIENT_ID: str = ""
+    GOOGLE_OAUTH_CLIENT_SECRET: str = ""
+    GOOGLE_OAUTH_REDIRECT_URI: str = ""
+    REQUIRE_EMAIL_VERIFICATION: bool = True
+    EXPOSE_DEV_AUTH_TOKENS: bool = False
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = ""
+    SMTP_USE_TLS: bool = True
 
     @property
     def effective_app_env(self) -> str:
@@ -313,6 +324,85 @@ class Settings(BaseSettings):
     @property
     def effective_max_rendered_video_bytes(self) -> int:
         return max(1024, _env_int("MAX_RENDERED_VIDEO_BYTES", self.MAX_RENDERED_VIDEO_BYTES))
+
+    @property
+    def effective_google_oauth_client_id(self) -> str:
+        env_val = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
+        return (env_val if env_val is not None else self.GOOGLE_OAUTH_CLIENT_ID).strip()
+
+    @property
+    def effective_google_oauth_client_secret(self) -> str:
+        env_val = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
+        return (env_val if env_val is not None else self.GOOGLE_OAUTH_CLIENT_SECRET).strip()
+
+    @property
+    def effective_google_oauth_redirect_uri(self) -> str:
+        env_val = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI")
+        configured = (
+            env_val if env_val is not None else self.GOOGLE_OAUTH_REDIRECT_URI
+        ).strip()
+        if configured:
+            return configured
+        base = self.effective_frontend_app_url or "http://localhost:3000"
+        return f"{base}/api/v1/auth/google/callback"
+
+    @property
+    def is_google_oauth_configured(self) -> bool:
+        return bool(
+            self.effective_google_oauth_client_id and self.effective_google_oauth_client_secret
+        )
+
+    @property
+    def effective_require_email_verification(self) -> bool:
+        raw = os.environ.get("REQUIRE_EMAIL_VERIFICATION")
+        if raw is not None:
+            return _env_bool("REQUIRE_EMAIL_VERIFICATION", True)
+        if self.effective_app_env == "test":
+            return False
+        return bool(self.REQUIRE_EMAIL_VERIFICATION)
+
+    @property
+    def effective_expose_dev_auth_tokens(self) -> bool:
+        if self.is_production:
+            return False
+        raw = os.environ.get("EXPOSE_DEV_AUTH_TOKENS")
+        if raw is not None:
+            return _env_bool("EXPOSE_DEV_AUTH_TOKENS", False)
+        if self.effective_app_env == "test":
+            return True
+        return bool(self.EXPOSE_DEV_AUTH_TOKENS)
+
+    @property
+    def effective_smtp_host(self) -> str:
+        env_val = os.environ.get("SMTP_HOST")
+        return (env_val if env_val is not None else self.SMTP_HOST).strip()
+
+    @property
+    def effective_smtp_port(self) -> int:
+        return max(1, _env_int("SMTP_PORT", self.SMTP_PORT))
+
+    @property
+    def effective_smtp_user(self) -> str:
+        env_val = os.environ.get("SMTP_USER")
+        return (env_val if env_val is not None else self.SMTP_USER).strip()
+
+    @property
+    def effective_smtp_password(self) -> str:
+        env_val = os.environ.get("SMTP_PASSWORD")
+        return (env_val if env_val is not None else self.SMTP_PASSWORD).strip()
+
+    @property
+    def effective_smtp_from_email(self) -> str:
+        env_val = os.environ.get("SMTP_FROM_EMAIL")
+        return (env_val if env_val is not None else self.SMTP_FROM_EMAIL).strip()
+
+    @property
+    def effective_smtp_use_tls(self) -> bool:
+        return _env_bool("SMTP_USE_TLS", self.SMTP_USE_TLS)
+
+    @property
+    def is_smtp_configured(self) -> bool:
+        return bool(self.effective_smtp_host and self.effective_smtp_from_email)
 
     def get_stripe_price_id(self, pack_id: str) -> str:
         pkg = CREDIT_PACKAGES.get(pack_id)

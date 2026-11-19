@@ -31,6 +31,7 @@ interface GenerateRequestBody {
     discountBadge?: string;
     hookText?: string;
     ctaText?: string;
+    veoPrompt?: string;
     productImageUrl?: string;
     productImageAssetId?: string;
     captions?: CaptionSegment[];
@@ -96,10 +97,20 @@ export async function POST(request: Request): Promise<NextResponse> {
       ? Math.max(2, Math.min(15, body.duration_seconds))
       : 4;
 
-  const customProps =
+  const rawCustomProps =
     body.custom_props && typeof body.custom_props === 'object'
       ? body.custom_props
       : undefined;
+  const trimmedPrompt =
+    typeof rawCustomProps?.veoPrompt === 'string'
+      ? rawCustomProps.veoPrompt.trim().slice(0, 1500)
+      : '';
+  const customProps = rawCustomProps
+    ? {
+        ...rawCustomProps,
+        ...(trimmedPrompt ? { veoPrompt: trimmedPrompt } : { veoPrompt: undefined }),
+      }
+    : undefined;
 
   const workerRes = await fetchWorker(request, '/v1/videos/generate', {
     method: 'POST',

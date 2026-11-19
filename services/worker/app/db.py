@@ -102,6 +102,10 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     full_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     is_email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    auth_provider: Mapped[str] = mapped_column(String(32), nullable=False, default="password")
+    google_sub: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, unique=True, index=True
+    )
     email_verify_token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     email_verify_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
