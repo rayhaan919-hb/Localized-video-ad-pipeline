@@ -6,9 +6,11 @@ import ipaddress
 import json
 import re
 import socket
+import time
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
+import httpcore
 import httpx
 from bs4 import BeautifulSoup
 
@@ -30,6 +32,12 @@ _BLOCKED_HOSTNAMES = {
 }
 
 
+_ALLOWED_PORTS = {80, 443, 8443}
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+_BENCHMARK_NETWORK = ipaddress.ip_network("198.18.0.0/15")
+_NUMERIC_OR_OBFUSCATED_IP_RE = re.compile(r"^(?:0x[0-9a-f]+|[0-9]+(?:\.[0-9a-fx]+){0,3})$", re.I)
+
+
 class ScraperError(Exception):
     """Base scraper error."""
 
@@ -39,19 +47,89 @@ class UnsafeUrlError(ScraperError):
 
 
 def _is_forbidden_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return (
-        ip_obj.is_private
+    if (
+        not ip_obj.is_global
+        or ip_obj.is_private
         or ip_obj.is_loopback
         or ip_obj.is_link_local
         or ip_obj.is_multicast
         or ip_obj.is_reserved
         or ip_obj.is_unspecified
-        or (
-            isinstance(ip_obj, ipaddress.IPv6Address)
-            and ip_obj.ipv4_mapped is not None
-            and _is_forbidden_ip(ip_obj.ipv4_mapped)
-        )
-    )
+    ):
+        return True
+    if isinstance(ip_obj, ipaddress.IPv4Address):
+        if ip_obj in _CGNAT_NETWORK or ip_obj in _BENCHMARK_NETWORK:
+            return True
+    if isinstance(ip_obj, ipaddress.IPv6Address):
+        for embedded in (ip_obj.ipv4_mapped, ip_obj.sixtofour):
+            if embedded is not None and _is_forbidden_ip(embedded):
+                return True
+        if ip_obj.teredo is not None:
+            for teredo_ip in ip_obj.teredo:
+                if _is_forbidden_ip(teredo_ip):
+                    return True
+    return False
+
+
+def _validate_host_string(host: str, port: int, *, allow_private_in_test: bool = False) -> None:
+    if allow_private_in_test:
+        return
+    if port not in _ALLOWED_PORTS:
+        raise UnsafeUrlError(f"Blocked non-standard outbound HTTP(S) port: {port}")
+    if host in _BLOCKED_HOSTNAMES or host.endswith(
+        (".internal", ".local", ".localhost", ".lan", ".home", ".corp")
+    ):
+        raise UnsafeUrlError(f"Blocked internal or metadata hostname: {host}")
+
+    # Direct canonical IP literal check
+    try:
+        ip_literal = ipaddress.ip_address(host)
+        if _is_forbidden_ip(ip_literal):
+            raise UnsafeUrlError(f"Blocked private or non-routable IP address: {host}")
+        return
+    except ValueError:
+        pass
+
+    # Reject octal/hex/integer/short-form obfuscated IPv4 literals (e.g. 0x7f000001, 2130706433)
+    if _NUMERIC_OR_OBFUSCATED_IP_RE.match(host):
+        try:
+            socket.inet_aton(host)
+            raise UnsafeUrlError(f"Blocked obfuscated or non-canonical IP address: {host}")
+        except OSError:
+            pass
+
+
+def resolve_and_validate_host_ips(
+    host: str,
+    port: int,
+    *,
+    allow_private_in_test: bool = False,
+) -> list[str]:
+    """Resolve host DNS records and verify every returned IP is strictly global and public."""
+    cleaned = (host or "").strip().lower().rstrip(".")
+    _validate_host_string(cleaned, port, allow_private_in_test=allow_private_in_test)
+    if allow_private_in_test:
+        return [cleaned]
+
+    try:
+        ip_literal = ipaddress.ip_address(cleaned)
+        if _is_forbidden_ip(ip_literal):
+            raise UnsafeUrlError(f"Blocked forbidden IP address: {cleaned}")
+        return [str(ip_literal)]
+    except ValueError:
+        pass
+
+    infos = socket.getaddrinfo(cleaned, port, type=socket.SOCK_STREAM)
+    validated_ips: list[str] = []
+    for info in infos:
+        sockaddr = info[4]
+        resolved_ip = sockaddr[0].split("%")[0]
+        ip_obj = ipaddress.ip_address(resolved_ip)
+        if _is_forbidden_ip(ip_obj):
+            raise UnsafeUrlError(f"URL host resolved to forbidden private IP: {resolved_ip}")
+        if resolved_ip not in validated_ips:
+            validated_ips.append(resolved_ip)
+    return validated_ips
 
 
 def validate_public_http_url(url: str, *, allow_private_in_test: bool = False) -> str:
@@ -69,32 +147,20 @@ def validate_public_http_url(url: str, *, allow_private_in_test: bool = False) -
     if allow_private_in_test:
         return cleaned
 
-    if host in _BLOCKED_HOSTNAMES or host.endswith((".internal", ".local", ".localhost")):
-        raise UnsafeUrlError(f"Blocked internal or metadata hostname: {host}")
-
-    # Direct IP literal check first
-    try:
-        ip_literal = ipaddress.ip_address(host)
-        if _is_forbidden_ip(ip_literal):
-            raise UnsafeUrlError(f"Blocked private or non-routable IP address: {host}")
-        return cleaned
-    except ValueError:
-        pass
-
-    # DNS resolution check to defeat DNS-to-internal rebinding
     try:
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        for info in infos:
-            sockaddr = info[4]
-            resolved_ip = sockaddr[0].split("%")[0]
-            ip_obj = ipaddress.ip_address(resolved_ip)
-            if _is_forbidden_ip(ip_obj):
-                raise UnsafeUrlError(f"URL host resolved to forbidden private IP: {resolved_ip}")
+    except ValueError as exc:
+        raise UnsafeUrlError("URL contains an invalid port.") from exc
+
+    _validate_host_string(host, port, allow_private_in_test=False)
+
+    # DNS pre-validation (also pinned again inside connect_tcp to defeat DNS rebinding)
+    try:
+        resolve_and_validate_host_ips(host, port, allow_private_in_test=False)
     except UnsafeUrlError:
         raise
     except OSError:
-        # Unresolvable host will fail cleanly during httpx request instead of crashing here
+        # Unresolvable host fails cleanly at transport connect time
         pass
 
     return cleaned
@@ -324,18 +390,126 @@ def parse_product_html(
     }
 
 
+class SSRFSafeNetworkBackend(httpcore.SyncBackend):
+    """Enforce validated IP pinning during TCP socket setup to defeat DNS rebinding TOCTOU."""
+
+    def __init__(
+        self,
+        *,
+        allow_private_in_test: bool = False,
+        pinned_ips: dict[tuple[str, int], list[str]] | None = None,
+    ) -> None:
+        super().__init__()
+        self._allow_private_in_test = allow_private_in_test
+        self._pinned_ips = pinned_ips if pinned_ips is not None else {}
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options=None,
+    ) -> httpcore.NetworkStream:
+        cleaned_host = (host or "").strip().lower().rstrip(".")
+        if self._allow_private_in_test:
+            return super().connect_tcp(
+                host,
+                port,
+                timeout=timeout,
+                local_address=local_address,
+                socket_options=socket_options,
+            )
+
+        key = (cleaned_host, int(port))
+        candidates = self._pinned_ips.get(key)
+        if not candidates:
+            try:
+                candidates = resolve_and_validate_host_ips(
+                    cleaned_host, int(port), allow_private_in_test=False
+                )
+            except OSError as exc:
+                raise httpcore.ConnectError(str(exc)) from exc
+            self._pinned_ips[key] = candidates
+
+        last_exc: Exception | None = None
+        for resolved_ip in candidates:
+            ip_obj = ipaddress.ip_address(resolved_ip)
+            if _is_forbidden_ip(ip_obj):
+                raise UnsafeUrlError(f"Blocked forbidden IP at socket connect: {resolved_ip}")
+            try:
+                return super().connect_tcp(
+                    resolved_ip,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except Exception as exc:
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            raise last_exc
+        raise ScraperError(f"Failed to connect to validated host {cleaned_host}:{port}")
+
+
+def _build_ssrf_safe_transport(
+    *,
+    allow_private_in_test: bool = False,
+    pinned_ips: dict[tuple[str, int], list[str]] | None = None,
+) -> httpx.HTTPTransport:
+    transport = httpx.HTTPTransport(retries=0)
+    transport._pool._network_backend = SSRFSafeNetworkBackend(  # type: ignore[attr-defined]
+        allow_private_in_test=allow_private_in_test,
+        pinned_ips=pinned_ips,
+    )
+    return transport
+
+
 def _fetch_with_ssrf_redirects(
     url: str,
     *,
     headers: dict[str, str],
     allow_private_in_test: bool = False,
     max_bytes: int = 2 * 1024 * 1024,
+    max_duration_seconds: float = 12.0,
+    allowed_content_types: tuple[str, ...] | None = None,
 ) -> tuple[int, str, bytes, dict[str, str]]:
-    """Perform a streaming HTTP GET resolving redirects and enforcing max_bytes."""
+    """Perform connection-pinned HTTP GET resolving redirects with size, MIME & duration caps."""
+    pinned_ips: dict[tuple[str, int], list[str]] = {}
     current_url = validate_public_http_url(url, allow_private_in_test=allow_private_in_test)
+    if not allow_private_in_test:
+        parsed_init = urlparse(current_url)
+        init_host = (parsed_init.hostname or "").strip().lower().rstrip(".")
+        init_port = parsed_init.port or (443 if parsed_init.scheme == "https" else 80)
+        try:
+            pinned = resolve_and_validate_host_ips(
+                init_host, init_port, allow_private_in_test=False
+            )
+            if pinned:
+                pinned_ips[(init_host, int(init_port))] = pinned
+        except OSError:
+            pass
+
+    safe_headers = {"Accept-Encoding": "identity", **headers}
     max_hops = 5
-    with httpx.Client(timeout=8.0, follow_redirects=False, headers=headers) as client:
+    deadline = time.monotonic() + max(1.0, float(max_duration_seconds))
+    timeout_cfg = httpx.Timeout(connect=5.0, read=6.0, write=5.0, pool=5.0)
+    transport = _build_ssrf_safe_transport(
+        allow_private_in_test=allow_private_in_test,
+        pinned_ips=pinned_ips,
+    )
+
+    with httpx.Client(
+        timeout=timeout_cfg,
+        follow_redirects=False,
+        headers=safe_headers,
+        transport=transport,
+        trust_env=False,
+    ) as client:
         for _ in range(max_hops + 1):
+            if time.monotonic() > deadline:
+                raise ScraperError("Remote fetch exceeded maximum allowed duration.")
             with client.stream("GET", current_url) as resp:
                 if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("location"):
                     next_url = urljoin(current_url, resp.headers["location"].strip())
@@ -343,7 +517,28 @@ def _fetch_with_ssrf_redirects(
                         next_url,
                         allow_private_in_test=allow_private_in_test,
                     )
+                    if not allow_private_in_test:
+                        parsed_next = urlparse(current_url)
+                        nh = (parsed_next.hostname or "").strip().lower().rstrip(".")
+                        np = parsed_next.port or (443 if parsed_next.scheme == "https" else 80)
+                        try:
+                            npinned = resolve_and_validate_host_ips(
+                                nh, np, allow_private_in_test=False
+                            )
+                            if npinned:
+                                pinned_ips[(nh, int(np))] = npinned
+                        except OSError:
+                            pass
                     continue
+
+                if allowed_content_types and resp.status_code == 200:
+                    raw_ct = (
+                        (resp.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+                    )
+                    if raw_ct and not any(
+                        raw_ct == ct or raw_ct.startswith(ct) for ct in allowed_content_types
+                    ):
+                        raise ScraperError(f"Unsupported remote Content-Type: {raw_ct}")
 
                 cl_header = resp.headers.get("content-length")
                 if cl_header:
@@ -356,6 +551,8 @@ def _fetch_with_ssrf_redirects(
                 chunks: list[bytes] = []
                 total = 0
                 for chunk in resp.iter_bytes():
+                    if time.monotonic() > deadline:
+                        raise ScraperError("Remote download exceeded maximum duration limit.")
                     total += len(chunk)
                     if total > max_bytes:
                         raise ScraperError("Remote response exceeded maximum allowed size.")
@@ -411,6 +608,7 @@ def scrape_product_url(
             product_url,
             headers=headers,
             allow_private_in_test=allow_private_in_test,
+            allowed_content_types=("text/html", "application/xhtml+xml"),
         )
         body_text = body_bytes.decode("utf-8", errors="replace")
         body_lower = body_text.lower()
@@ -458,6 +656,7 @@ def download_and_validate_product_image(
         headers=headers,
         allow_private_in_test=allow_private_in_test,
         max_bytes=int(settings.MAX_ASSET_UPLOAD_BYTES),
+        allowed_content_types=("image/jpeg", "image/jpg", "image/png", "image/webp"),
     )
     if status_code != 200:
         raise ScraperError(f"Failed to download product image (HTTP {status_code}).")

@@ -25,7 +25,7 @@ from app.db import (
     reverse_credits_for_payment_refund,
     utcnow,
 )
-from app.security import log_audit_event
+from app.security import log_audit_event, metrics_registry
 
 
 class BillingError(Exception):
@@ -328,25 +328,86 @@ def _process_stripe_webhook_inner(
                 "currency": currency,
             },
         )
-        session.add(
-            StripeEvent(
-                id=str(uuid.uuid4()),
-                stripe_event_id=event_id,
-                event_type=event_type,
-                payment_intent_id=payment_intent_id,
-                checkout_session_id=checkout_session_id,
-                workspace_id=workspace_id,
-                user_id=user_id,
-                pack_id=pack_id,
-                amount_cents=amount_total,
-                currency=currency,
-                credits_delta=credits,
-                status="processed",
-                payload_summary={"new_balance": new_balance},
-                created_at=utcnow(),
-            )
+        purchase_event = StripeEvent(
+            id=str(uuid.uuid4()),
+            stripe_event_id=event_id,
+            event_type=event_type,
+            payment_intent_id=payment_intent_id,
+            checkout_session_id=checkout_session_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pack_id=pack_id,
+            amount_cents=amount_total,
+            currency=currency,
+            credits_delta=credits,
+            status="processed",
+            payload_summary={"new_balance": new_balance},
+            created_at=utcnow(),
         )
+        session.add(purchase_event)
+        session.flush()
+
+        # Reconcile any out-of-order refund/dispute webhook that arrived before checkout completion.
+        prior_refunds = list(
+            session.scalars(
+                select(StripeEvent)
+                .where(
+                    StripeEvent.payment_intent_id == payment_intent_id,
+                    StripeEvent.status == "refund_without_matching_purchase",
+                )
+                .order_by(StripeEvent.created_at.asc())
+            ).all()
+        )
+        for prior in prior_refunds:
+            ref_amount = int(prior.amount_cents or amount_total or 0)
+            if amount_total > 0 and 0 < ref_amount < amount_total:
+                target_rev = max(1, round(credits * (ref_amount / amount_total)))
+            else:
+                target_rev = credits
+            already_rev = int(
+                session.scalar(
+                    select(func.coalesce(func.sum(-StripeEvent.credits_delta), 0)).where(
+                        StripeEvent.payment_intent_id == payment_intent_id,
+                        StripeEvent.credits_delta < 0,
+                    )
+                )
+                or 0
+            )
+            to_revoke = max(0, min(credits, target_rev) - already_rev)
+            if to_revoke > 0:
+                new_balance, revoked_now = reverse_credits_for_payment_refund(
+                    session,
+                    workspace_id=workspace_id,
+                    credits_to_revoke=to_revoke,
+                    payment_id=payment_intent_id,
+                    idempotency_key=f"stripe_refund:{prior.stripe_event_id}",
+                    user_id=user_id,
+                    reason=(
+                        f"Reconciled out-of-order Stripe {prior.event_type} "
+                        f"for payment {payment_intent_id}"
+                    ),
+                    metadata={
+                        "stripe_event_id": prior.stripe_event_id,
+                        "reconciled_by_purchase_event": event_id,
+                        "amount_refunded": ref_amount,
+                    },
+                )
+                prior.credits_delta = -revoked_now
+            else:
+                revoked_now = 0
+            prior.workspace_id = workspace_id
+            prior.user_id = user_id
+            prior.pack_id = pack_id
+            prior.status = "refund_processed_out_of_order"
+            prior.payload_summary = {
+                "new_balance": new_balance,
+                "revoked": revoked_now,
+                "reconciled_with": event_id,
+            }
+            metrics_registry.incr("billing.out_of_order_refund_reconciled")
+
         session.commit()
+        metrics_registry.incr("billing.credits_granted")
         log_audit_event(
             "stripe_credits_granted",
             user_id=user_id,
@@ -403,6 +464,8 @@ def _process_stripe_webhook_inner(
                     stripe_event_id=event_id,
                     event_type=event_type,
                     payment_intent_id=payment_intent_id or None,
+                    amount_cents=int(obj.get("amount_refunded") or obj.get("amount") or 0) or None,
+                    currency=str(obj.get("currency") or "").lower() or None,
                     credits_delta=0,
                     status="refund_without_matching_purchase",
                     created_at=utcnow(),

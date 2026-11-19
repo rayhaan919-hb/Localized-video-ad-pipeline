@@ -339,3 +339,32 @@ test('Google OAuth & verification UI, BFF routes, and main-menu Custom Video Pro
   );
   assert.equal(generateRouteText.includes('veoPrompt'), true);
 });
+
+test('Hardening Phase 9-13: BFF logout-all, X-Request-ID propagation, and CI security gates stay wired', () => {
+  const reqWithCorr = new Request('http://localhost:3000/api/v1/videos/generate', {
+    headers: {
+      'x-request-id': 'corr-req-xyz-123',
+      cookie: 'lva_access_token=jwt.token.value',
+    },
+  });
+  const fwd = buildWorkerForwardHeaders(reqWithCorr);
+  assert.equal(fwd.get('x-request-id'), 'corr-req-xyz-123');
+
+  const cwdCandidate = path.join(process.cwd(), 'next.config.mjs');
+  const studioRoot = fs.existsSync(cwdCandidate)
+    ? process.cwd()
+    : path.join(process.cwd(), 'apps', 'studio');
+
+  const authProxyText = fs.readFileSync(
+    path.join(studioRoot, 'src', 'app', 'api', 'v1', 'auth', '[...path]', 'route.ts'),
+    'utf-8'
+  );
+  assert.equal(authProxyText.includes("'logout-all'"), true);
+
+  const serverStoreText = fs.readFileSync(
+    path.join(studioRoot, 'src', 'lib', 'serverStore.ts'),
+    'utf-8'
+  );
+  assert.equal(serverStoreText.includes('workerUnavailableResponse'), true);
+  assert.equal(serverStoreText.includes('status: 503'), true);
+});

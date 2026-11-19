@@ -65,6 +65,13 @@ def _env_int(name: str, default: int) -> int:
     return int(raw.strip())
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return float(default)
+    return float(raw.strip())
+
+
 def _is_host_port_reachable(host: str, port: int, timeout: float = 0.2) -> bool:
     """Return True if a TCP connection to (host, port) succeeds within timeout."""
     try:
@@ -160,6 +167,30 @@ class Settings(BaseSettings):
     MAX_ASSET_UPLOAD_BYTES: int = 8 * 1024 * 1024
     RATE_LIMIT_AUTH_PER_MINUTE: int = 15
     RATE_LIMIT_API_PER_MINUTE: int = 120
+    RATE_LIMIT_LOGIN_PER_MINUTE: int = 15
+    RATE_LIMIT_REGISTER_PER_MINUTE: int = 10
+    RATE_LIMIT_PASSWORD_RESET_PER_MINUTE: int = 10
+    RATE_LIMIT_GENERATE_PER_MINUTE: int = 30
+    RATE_LIMIT_RENDER_RETRY_PER_MINUTE: int = 20
+    RATE_LIMIT_SCRAPE_PER_MINUTE: int = 60
+    RATE_LIMIT_DOWNLOAD_PER_MINUTE: int = 120
+    RATE_LIMIT_BILLING_PER_MINUTE: int = 20
+    RATE_LIMIT_BURST_WINDOW_SECONDS: int = 10
+    RATE_LIMIT_BURST_MULTIPLIER: float = 0.5
+    REQUIRE_REDIS_BROKER: bool = False
+    REQUIRE_ACTIVE_CELERY_WORKER: bool = False
+    JOB_LEASE_DURATION_SECONDS: int = 120
+    JOB_HEARTBEAT_INTERVAL_SECONDS: int = 30
+    JOB_UNCLAIMED_GRACE_SECONDS: int = 120
+    JOB_SOFT_TIME_LIMIT_SECONDS: int = 300
+    JOB_HARD_TIME_LIMIT_SECONDS: int = 360
+    JOB_MAX_RETRIES: int = 3
+    JOB_RETRY_BASE_DELAY_SECONDS: float = 2.0
+    JOB_RETRY_MAX_DELAY_SECONDS: float = 60.0
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
+    DB_POOL_TIMEOUT: int = 30
+    DB_POOL_RECYCLE: int = 1800
     AUTH_LOCKOUT_MAX_ATTEMPTS: int = 5
     AUTH_LOCKOUT_WINDOW_SECONDS: int = 900
     TRUST_PROXY_HEADERS: bool = False
@@ -404,6 +435,132 @@ class Settings(BaseSettings):
     def is_smtp_configured(self) -> bool:
         return bool(self.effective_smtp_host and self.effective_smtp_from_email)
 
+    @property
+    def effective_redis_url(self) -> str:
+        env_val = os.environ.get("REDIS_URL")
+        return (env_val if env_val is not None else self.REDIS_URL).strip()
+
+    @property
+    def effective_require_redis_broker(self) -> bool:
+        if self.is_production:
+            return True
+        return _env_bool("REQUIRE_REDIS_BROKER", self.REQUIRE_REDIS_BROKER)
+
+    @property
+    def effective_require_active_celery_worker(self) -> bool:
+        return _env_bool("REQUIRE_ACTIVE_CELERY_WORKER", self.REQUIRE_ACTIVE_CELERY_WORKER)
+
+    @property
+    def effective_job_lease_duration_seconds(self) -> int:
+        return max(10, _env_int("JOB_LEASE_DURATION_SECONDS", self.JOB_LEASE_DURATION_SECONDS))
+
+    @property
+    def effective_job_heartbeat_interval_seconds(self) -> int:
+        return max(
+            1, _env_int("JOB_HEARTBEAT_INTERVAL_SECONDS", self.JOB_HEARTBEAT_INTERVAL_SECONDS)
+        )
+
+    @property
+    def effective_job_unclaimed_grace_seconds(self) -> int:
+        return max(0, _env_int("JOB_UNCLAIMED_GRACE_SECONDS", self.JOB_UNCLAIMED_GRACE_SECONDS))
+
+    @property
+    def effective_job_soft_time_limit_seconds(self) -> int:
+        return max(10, _env_int("JOB_SOFT_TIME_LIMIT_SECONDS", self.JOB_SOFT_TIME_LIMIT_SECONDS))
+
+    @property
+    def effective_job_hard_time_limit_seconds(self) -> int:
+        soft = self.effective_job_soft_time_limit_seconds
+        hard = max(15, _env_int("JOB_HARD_TIME_LIMIT_SECONDS", self.JOB_HARD_TIME_LIMIT_SECONDS))
+        return max(soft + 5, hard)
+
+    @property
+    def effective_job_max_retries(self) -> int:
+        return max(0, _env_int("JOB_MAX_RETRIES", self.JOB_MAX_RETRIES))
+
+    @property
+    def effective_job_retry_base_delay_seconds(self) -> float:
+        return max(
+            0.05, _env_float("JOB_RETRY_BASE_DELAY_SECONDS", self.JOB_RETRY_BASE_DELAY_SECONDS)
+        )
+
+    @property
+    def effective_job_retry_max_delay_seconds(self) -> float:
+        base = self.effective_job_retry_base_delay_seconds
+        return max(
+            base, _env_float("JOB_RETRY_MAX_DELAY_SECONDS", self.JOB_RETRY_MAX_DELAY_SECONDS)
+        )
+
+    @property
+    def effective_db_pool_size(self) -> int:
+        return max(1, _env_int("DB_POOL_SIZE", self.DB_POOL_SIZE))
+
+    @property
+    def effective_db_max_overflow(self) -> int:
+        return max(0, _env_int("DB_MAX_OVERFLOW", self.DB_MAX_OVERFLOW))
+
+    @property
+    def effective_db_pool_timeout(self) -> int:
+        return max(5, _env_int("DB_POOL_TIMEOUT", self.DB_POOL_TIMEOUT))
+
+    @property
+    def effective_db_pool_recycle(self) -> int:
+        return max(60, _env_int("DB_POOL_RECYCLE", self.DB_POOL_RECYCLE))
+
+    @property
+    def effective_rate_limit_burst_window_seconds(self) -> int:
+        return max(
+            1, _env_int("RATE_LIMIT_BURST_WINDOW_SECONDS", self.RATE_LIMIT_BURST_WINDOW_SECONDS)
+        )
+
+    @property
+    def effective_rate_limit_burst_multiplier(self) -> float:
+        val = _env_float("RATE_LIMIT_BURST_MULTIPLIER", self.RATE_LIMIT_BURST_MULTIPLIER)
+        return min(1.0, max(0.1, val))
+
+    def get_rate_limit(self, category: str) -> int:
+        mapping = {
+            "auth_login": ("RATE_LIMIT_LOGIN_PER_MINUTE", self.RATE_LIMIT_LOGIN_PER_MINUTE),
+            "auth_register": (
+                "RATE_LIMIT_REGISTER_PER_MINUTE",
+                self.RATE_LIMIT_REGISTER_PER_MINUTE,
+            ),
+            "auth_password_reset": (
+                "RATE_LIMIT_PASSWORD_RESET_PER_MINUTE",
+                self.RATE_LIMIT_PASSWORD_RESET_PER_MINUTE,
+            ),
+            "video_generate": (
+                "RATE_LIMIT_GENERATE_PER_MINUTE",
+                self.RATE_LIMIT_GENERATE_PER_MINUTE,
+            ),
+            "video_render_retry": (
+                "RATE_LIMIT_RENDER_RETRY_PER_MINUTE",
+                self.RATE_LIMIT_RENDER_RETRY_PER_MINUTE,
+            ),
+            "product_scrape": ("RATE_LIMIT_SCRAPE_PER_MINUTE", self.RATE_LIMIT_SCRAPE_PER_MINUTE),
+            "file_download": (
+                "RATE_LIMIT_DOWNLOAD_PER_MINUTE",
+                self.RATE_LIMIT_DOWNLOAD_PER_MINUTE,
+            ),
+            "billing_checkout": (
+                "RATE_LIMIT_BILLING_PER_MINUTE",
+                self.RATE_LIMIT_BILLING_PER_MINUTE,
+            ),
+        }
+        env_key, default_val = mapping.get(
+            category, ("RATE_LIMIT_API_PER_MINUTE", self.RATE_LIMIT_API_PER_MINUTE)
+        )
+        specific_env = os.environ.get(env_key)
+        if specific_env is not None and specific_env.strip():
+            return max(1, int(specific_env.strip()))
+        if category.startswith("auth_"):
+            auth_env = os.environ.get("RATE_LIMIT_AUTH_PER_MINUTE")
+            if auth_env is not None and auth_env.strip():
+                return max(1, int(auth_env.strip()))
+            if self.RATE_LIMIT_AUTH_PER_MINUTE != 15:
+                return max(1, int(self.RATE_LIMIT_AUTH_PER_MINUTE))
+        return max(1, int(default_val))
+
     def get_stripe_price_id(self, pack_id: str) -> str:
         pkg = CREDIT_PACKAGES.get(pack_id)
         if not pkg:
@@ -431,6 +588,19 @@ def validate_production_config() -> None:
         errors.append("MOCK_TTS must be false in production.")
     if settings.effective_enable_dev_topup:
         errors.append("ENABLE_DEV_TOPUP must be false in production.")
+    if _env_bool("CELERY_ALWAYS_EAGER", False):
+        errors.append(
+            "CELERY_ALWAYS_EAGER must be false in production; "
+            "dedicated Celery workers are required."
+        )
+
+    redis_url = settings.effective_redis_url
+    if not redis_url or not redis_url.startswith(("redis://", "rediss://")):
+        errors.append("REDIS_URL must be configured with redis:// or rediss:// in production.")
+    elif not is_redis_reachable(redis_url):
+        errors.append(
+            "REDIS_URL is unreachable in production; silent fallback to memory:// is forbidden."
+        )
 
     db_url = settings.effective_database_url
     if not db_url or db_url.startswith("sqlite:"):

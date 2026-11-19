@@ -1,5 +1,8 @@
 name: CI Verification Pipeline
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main, master]
@@ -8,7 +11,7 @@ on:
 
 jobs:
   worker-verify:
-    name: Python Worker Lint & Tests
+    name: Python Worker Lint, Security & Tests
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -35,8 +38,16 @@ jobs:
       - name: Run Ruff lint checks
         run: ruff check .
 
-      - name: Run Pytest security, billing, AI & rendering suite
+      - name: Run Pytest security, reliability, billing & rendering suite
         run: pytest -v
+
+      - name: Verify schema migrations cleanly upgrade fresh DB
+        run: |
+          APP_ENV=test DATABASE_URL="sqlite:///./ci_migration_smoke.db" python -c "from app.db import init_db; init_db()"
+          rm -f ./ci_migration_smoke.db
+
+      - name: Audit Python dependencies for known CVEs
+        run: pip-audit --strict --desc
 
   studio-and-remotion-verify:
     name: Remotion & Next.js Studio Typecheck, Lint, Test & Build
@@ -53,6 +64,13 @@ jobs:
 
       - name: Install workspace dependencies
         run: npm ci
+
+      - name: Audit production NPM dependencies (high/critical gate)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Verify no real secrets or live keys committed in source
+        run: |
+          ! grep -rnE "sk_live_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{20,}|AIzaSy[A-Za-z0-9_-]{30,}|-----BEGIN (RSA |EC )?PRIVATE KEY-----" apps packages services schema.sql
 
       - name: Verify @video-ad/remotion (typecheck + lint)
         run: |

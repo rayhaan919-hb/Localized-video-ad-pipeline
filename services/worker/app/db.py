@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import (
@@ -21,6 +21,9 @@ from sqlalchemy import (
     case,
     create_engine,
     event,
+    func,
+    inspect,
+    or_,
     select,
     update,
 )
@@ -239,6 +242,7 @@ class VideoJob(Base):
             name="ck_video_jobs_status",
         ),
         Index("idx_video_jobs_workspace_created", "workspace_id", "created_at"),
+        Index("idx_video_jobs_status_lease", "status", "lease_expires_at"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -266,6 +270,13 @@ class VideoJob(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     reserved_credits: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )
@@ -367,14 +378,55 @@ def _build_engine(database_url: str | None = None) -> Engine:
         raise RuntimeError("DATABASE_URL is not configured.")
     is_sqlite = url.startswith("sqlite")
     connect_args = {"check_same_thread": False, "timeout": 15} if is_sqlite else {}
-    target_engine = create_engine(
-        url,
-        connect_args=connect_args,
-        pool_pre_ping=True,
-        future=True,
-    )
+    engine_kwargs: dict[str, Any] = {
+        "connect_args": connect_args,
+        "pool_pre_ping": True,
+        "future": True,
+    }
+    if not is_sqlite:
+        engine_kwargs.update(
+            {
+                "pool_size": settings.effective_db_pool_size,
+                "max_overflow": settings.effective_db_max_overflow,
+                "pool_timeout": settings.effective_db_pool_timeout,
+                "pool_recycle": settings.effective_db_pool_recycle,
+            }
+        )
+    target_engine = create_engine(url, **engine_kwargs)
     _configure_sqlite_pragmas(target_engine)
     return target_engine
+
+
+_IMMUTABLE_LEDGER_FIELDS = (
+    "workspace_id",
+    "user_id",
+    "job_id",
+    "payment_id",
+    "transaction_type",
+    "amount",
+    "delta",
+    "previous_balance",
+    "new_balance",
+    "balance_after",
+    "idempotency_key",
+    "created_at",
+)
+
+
+@event.listens_for(CreditLedger, "before_delete")
+def _prevent_credit_ledger_delete(_mapper, _connection, _target) -> None:
+    raise RuntimeError("CreditLedger records are immutable and cannot be deleted.")
+
+
+@event.listens_for(CreditLedger, "before_update")
+def _prevent_credit_ledger_financial_mutation(_mapper, _connection, target) -> None:
+    state = inspect(target)
+    for field_name in _IMMUTABLE_LEDGER_FIELDS:
+        hist = state.get_history(field_name, True)
+        if hist.has_changes():
+            raise RuntimeError(
+                f"CreditLedger field '{field_name}' is immutable and cannot be modified."
+            )
 
 
 engine: Engine = _build_engine()
@@ -909,3 +961,150 @@ def reverse_credits_for_payment_refund(
     )
     session.flush()
     return new_balance, revoked
+
+
+def acquire_job_lease(
+    session: Session,
+    *,
+    job_id: str | uuid.UUID,
+    worker_id: str,
+    lease_seconds: int = 120,
+) -> int | None:
+    """Atomically claim or renew ownership of an active VideoJob with fencing token increment."""
+    job_str = str(uuid.UUID(str(job_id)))
+    now = utcnow()
+    expires = now + timedelta(seconds=max(5, int(lease_seconds)))
+    terminal_statuses = ("COMPLETED", "FAILED", "CANCELLED")
+    stmt = (
+        update(VideoJob)
+        .where(
+            VideoJob.id == job_str,
+            VideoJob.status.notin_(terminal_statuses),
+            or_(
+                VideoJob.worker_id.is_(None),
+                VideoJob.worker_id == worker_id,
+                VideoJob.lease_expires_at.is_(None),
+                VideoJob.lease_expires_at <= now,
+            ),
+        )
+        .values(
+            worker_id=worker_id,
+            heartbeat_at=now,
+            lease_expires_at=expires,
+            fencing_token=VideoJob.fencing_token + 1,
+            updated_at=now,
+        )
+        .returning(VideoJob.fencing_token)
+    )
+    row = session.execute(stmt).fetchone()
+    if row is None:
+        return None
+    for obj in list(session.identity_map.values()):
+        if isinstance(obj, VideoJob) and obj.id == job_str:
+            session.expire(
+                obj,
+                ["worker_id", "heartbeat_at", "lease_expires_at", "fencing_token", "updated_at"],
+            )
+    return int(row[0])
+
+
+def renew_job_lease(
+    session: Session,
+    *,
+    job_id: str | uuid.UUID,
+    worker_id: str,
+    fencing_token: int,
+    lease_seconds: int = 120,
+) -> bool:
+    """Extend an active worker lease if worker_id and fencing_token still match."""
+    job_str = str(uuid.UUID(str(job_id)))
+    now = utcnow()
+    expires = now + timedelta(seconds=max(5, int(lease_seconds)))
+    terminal_statuses = ("COMPLETED", "FAILED", "CANCELLED")
+    res = session.execute(
+        update(VideoJob)
+        .where(
+            VideoJob.id == job_str,
+            VideoJob.worker_id == worker_id,
+            VideoJob.fencing_token == int(fencing_token),
+            VideoJob.status.notin_(terminal_statuses),
+        )
+        .values(
+            heartbeat_at=now,
+            lease_expires_at=expires,
+            updated_at=now,
+        )
+    )
+    return int(res.rowcount or 0) > 0
+
+
+def release_job_lease(
+    session: Session,
+    *,
+    job_id: str | uuid.UUID,
+    worker_id: str,
+    fencing_token: int,
+) -> bool:
+    """Release worker ownership cleanly only if worker_id and fencing_token match."""
+    job_str = str(uuid.UUID(str(job_id)))
+    res = session.execute(
+        update(VideoJob)
+        .where(
+            VideoJob.id == job_str,
+            VideoJob.worker_id == worker_id,
+            VideoJob.fencing_token == int(fencing_token),
+        )
+        .values(
+            worker_id=None,
+            lease_expires_at=None,
+            updated_at=utcnow(),
+        )
+    )
+    return int(res.rowcount or 0) > 0
+
+
+def reconcile_workspace_credits(session: Session, workspace_id: str | uuid.UUID) -> dict[str, Any]:
+    """Compare Workspace spendable/reserved balances against immutable CreditLedger entries."""
+    ws_id = str(uuid.UUID(str(workspace_id)))
+    ws = session.get(Workspace, ws_id)
+    if ws is None:
+        raise ValueError(f"Workspace {ws_id} not found.")
+
+    ledger_net = int(
+        session.scalar(
+            select(func.coalesce(func.sum(CreditLedger.delta), 0)).where(
+                CreditLedger.workspace_id == ws_id
+            )
+        )
+        or 0
+    )
+    pending_reservations = int(
+        session.scalar(
+            select(func.coalesce(func.sum(CreditLedger.amount), 0)).where(
+                CreditLedger.workspace_id == ws_id,
+                CreditLedger.transaction_type == "reservation",
+                CreditLedger.status == "pending",
+            )
+        )
+        or 0
+    )
+    entry_count = int(
+        session.scalar(
+            select(func.count(CreditLedger.id)).where(CreditLedger.workspace_id == ws_id)
+        )
+        or 0
+    )
+    return {
+        "workspace_id": ws_id,
+        "credit_balance": int(ws.credit_balance),
+        "reserved_balance": int(ws.reserved_balance),
+        "ledger_net_credits": ledger_net,
+        "pending_reservations": pending_reservations,
+        "ledger_entries": entry_count,
+        "balance_discrepancy": int(ws.credit_balance) - ledger_net,
+        "reserved_discrepancy": int(ws.reserved_balance) - pending_reservations,
+        "is_balanced": (
+            int(ws.credit_balance) == ledger_net
+            and int(ws.reserved_balance) == pending_reservations
+        ),
+    }

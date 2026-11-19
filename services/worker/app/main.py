@@ -6,6 +6,7 @@ import base64
 import hmac
 import json
 import re
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -27,7 +28,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import AnyHttpUrl, BaseModel, Field
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -52,6 +53,7 @@ from app.auth import (
     register_user,
     request_password_reset,
     require_workspace_role,
+    revoke_all_user_sessions,
     revoke_refresh_session,
     rotate_refresh_session,
     send_verification_email,
@@ -68,7 +70,7 @@ from app.billing import (
     get_public_credit_packages,
     process_stripe_webhook,
 )
-from app.config import is_redis_reachable, settings, validate_production_config
+from app.config import settings, validate_production_config
 from app.db import (
     CreditLedger,
     InsufficientCreditsError,
@@ -82,6 +84,7 @@ from app.db import (
     create_workspace_for_user,
     get_session,
     init_db,
+    reconcile_workspace_credits,
     refund_credit_atomically,
     reserve_credit_atomically,
     utcnow,
@@ -92,7 +95,13 @@ from app.scraper import (
     validate_image_bytes,
     validate_public_http_url,
 )
-from app.security import RequestContextMiddleware, get_client_ip, log_audit_event, rate_limiter
+from app.security import (
+    RequestContextMiddleware,
+    get_client_ip,
+    log_audit_event,
+    metrics_registry,
+    rate_limiter,
+)
 from app.storage import (
     StorageError,
     create_signed_download_token,
@@ -100,7 +109,13 @@ from app.storage import (
     resolve_workspace_rel_path,
     verify_signed_download_token,
 )
-from app.tasks import celery_app, process_video_job, recover_interrupted_jobs
+from app.tasks import (
+    BrokerUnavailableError,
+    celery_app,
+    check_queue_health,
+    dispatch_video_job,
+    recover_interrupted_jobs,
+)
 from app.veo import get_ffmpeg_binary
 
 LanguageCode = Literal["ur", "ar", "hi", "en"]
@@ -292,22 +307,47 @@ def _serialize_job(job: VideoJob, credit_balance: int | None = None) -> VideoJob
     )
 
 
-def _enforce_rate_limit(request: Request, bucket: str, subject: str, limit: int) -> None:
-    allowed, retry_after = rate_limiter.check(bucket, subject, limit=limit, window_seconds=60)
-    if not allowed:
+def _enforce_rate_limit(
+    request: Request,
+    bucket: str,
+    subject: str,
+    limit: int,
+    *,
+    burst_limit: int | None = None,
+) -> None:
+    burst_win = settings.effective_rate_limit_burst_window_seconds if burst_limit else None
+    decision = rate_limiter.check_with_metadata(
+        bucket,
+        subject,
+        limit=limit,
+        window_seconds=60,
+        burst_limit=burst_limit,
+        burst_window_seconds=burst_win,
+    )
+    if not decision.allowed:
+        metrics_registry.incr(f"rate_limit.rejected.{bucket}")
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded. Please retry shortly.",
-            headers={"Retry-After": str(retry_after)},
+            headers={
+                "Retry-After": str(decision.retry_after),
+                "X-RateLimit-Limit": str(decision.limit),
+                "X-RateLimit-Remaining": "0",
+            },
         )
 
 
-def _enforce_auth_rate_limit(request: Request, extra_key: str = "") -> None:
+def _enforce_auth_rate_limit(
+    request: Request,
+    extra_key: str = "",
+    *,
+    category: str = "auth_login",
+) -> None:
     ip = get_client_ip(request)
-    limit = int(settings.RATE_LIMIT_AUTH_PER_MINUTE)
-    _enforce_rate_limit(request, "auth_ip", ip, limit)
+    limit = settings.get_rate_limit(category)
+    _enforce_rate_limit(request, f"{category}_ip", ip, limit)
     if extra_key:
-        _enforce_rate_limit(request, "auth_subject", extra_key.lower(), limit)
+        _enforce_rate_limit(request, f"{category}_subject", extra_key.lower(), limit)
 
 
 @asynccontextmanager
@@ -315,7 +355,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     """Validate production security settings, migrate schema, and recover interrupted jobs."""
     validate_production_config()
     init_db()
-    recover_interrupted_jobs(min_age_seconds=0 if celery_app.conf.task_always_eager else 900)
+    grace = (
+        0
+        if celery_app.conf.task_always_eager
+        else settings.effective_job_unclaimed_grace_seconds
+    )
+    recover_interrupted_jobs(min_age_seconds=grace)
     yield
 
 
@@ -346,12 +391,23 @@ app.add_middleware(
 
 @app.get("/health")
 def health_check() -> Any:
-    """Readiness probe checking DB connectivity & FFmpeg without exposing sensitive creds."""
+    """Readiness probe checking DB, queue, and FFmpeg without exposing sensitive creds."""
     db_ok = False
+    in_flight_jobs = 0
     try:
         with db_module.SessionLocal() as session:
             session.execute(text("SELECT 1"))
             db_ok = True
+            in_flight_jobs = int(
+                session.scalar(
+                    select(func.count(VideoJob.id)).where(
+                        VideoJob.status.in_(
+                            ("CREATED", "QUEUED", "PROCESSING", "RENDERING")
+                        )
+                    )
+                )
+                or 0
+            )
     except Exception:
         db_ok = False
 
@@ -361,6 +417,7 @@ def health_check() -> Any:
     except Exception:
         ffmpeg_available = False
 
+    queue_info = check_queue_health(inspect_workers=False)
     payload = {
         "status": "ok" if db_ok else "degraded",
         "service": "localized-video-ad-worker",
@@ -373,11 +430,91 @@ def health_check() -> Any:
         "stripe_configured": bool(
             settings.effective_stripe_secret_key and settings.effective_stripe_webhook_secret
         ),
-        "redis_broker": is_redis_reachable(settings.REDIS_URL),
+        "in_flight_jobs": in_flight_jobs,
+        **queue_info,
     }
     if not db_ok:
         return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=payload)
+    if settings.is_production and (
+        not queue_info["redis_broker"] or queue_info["celery_eager_mode"]
+    ):
+        payload["status"] = "degraded"
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=payload)
     return payload
+
+
+@app.get("/v1/ops/metrics")
+def ops_metrics(
+    request: Request,
+    x_admin_secret: str = Header(default="", alias="X-Admin-Secret"),
+    db: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Operational telemetry endpoint reporting DB, Redis/queue, leases, and latencies."""
+    configured_admin = settings.effective_admin_adjust_secret
+    has_admin_secret = bool(
+        configured_admin
+        and x_admin_secret
+        and hmac.compare_digest(x_admin_secret.strip(), configured_admin)
+    )
+    if not has_admin_secret:
+        user = get_current_user(request, db)
+        if not user.is_admin and settings.is_production:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Administrator authorization is required for ops metrics.",
+            )
+
+    t0 = time.perf_counter()
+    db.execute(text("SELECT 1"))
+    db_latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+
+    now = utcnow()
+    in_flight = int(
+        db.scalar(
+            select(func.count(VideoJob.id)).where(
+                VideoJob.status.in_(("CREATED", "QUEUED", "PROCESSING", "RENDERING"))
+            )
+        )
+        or 0
+    )
+    active_leases = int(
+        db.scalar(
+            select(func.count(VideoJob.id)).where(
+                VideoJob.status.in_(("PROCESSING", "RENDERING")),
+                VideoJob.lease_expires_at > now,
+            )
+        )
+        or 0
+    )
+    expired_leases = int(
+        db.scalar(
+            select(func.count(VideoJob.id)).where(
+                VideoJob.status.in_(("PROCESSING", "RENDERING")),
+                VideoJob.lease_expires_at.is_not(None),
+                VideoJob.lease_expires_at <= now,
+            )
+        )
+        or 0
+    )
+    failed_jobs = int(
+        db.scalar(select(func.count(VideoJob.id)).where(VideoJob.status == "FAILED")) or 0
+    )
+    queue_health = check_queue_health(inspect_workers=False)
+
+    return {
+        "service": "localized-video-ad-worker",
+        "environment": settings.effective_app_env,
+        "db_latency_ms": db_latency_ms,
+        "rate_limiter_backend": rate_limiter.backend_mode,
+        "queue": queue_health,
+        "jobs": {
+            "in_flight": in_flight,
+            "active_leases": active_leases,
+            "expired_leases": expired_leases,
+            "total_failed": failed_jobs,
+        },
+        "telemetry": metrics_registry.snapshot(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +539,7 @@ def auth_register(
     response: Response,
     db: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    _enforce_auth_rate_limit(request, payload.email)
+    _enforce_auth_rate_limit(request, payload.email, category="auth_register")
     try:
         user, workspace, verify_token = register_user(
             db,
@@ -485,7 +622,7 @@ def auth_login(
     response: Response,
     db: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    _enforce_auth_rate_limit(request, payload.email)
+    _enforce_auth_rate_limit(request, payload.email, category="auth_login")
     try:
         user = authenticate_user(db, email=payload.email, password=payload.password)
         tokens = issue_session_tokens(
@@ -563,6 +700,26 @@ def auth_logout(
     return {"logged_out": True}
 
 
+@app.post("/v1/auth/logout-all")
+def auth_logout_all(
+    request: Request,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Revoke every active refresh session across all devices for current_user."""
+    revoked = revoke_all_user_sessions(db, current_user.id)
+    db.commit()
+    _clear_auth_cookies(response)
+    log_audit_event(
+        "user_logged_out_all",
+        user_id=current_user.id,
+        ip_address=get_client_ip(request),
+        details={"revoked_sessions": revoked},
+    )
+    return {"logged_out_all": True, "revoked_sessions": revoked}
+
+
 @app.get("/v1/auth/me")
 def auth_me(
     current_user: User = Depends(get_current_user),
@@ -611,7 +768,7 @@ def auth_password_reset_request(
     request: Request,
     db: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    _enforce_auth_rate_limit(request, payload.email)
+    _enforce_auth_rate_limit(request, payload.email, category="auth_password_reset")
     try:
         user, raw_token = request_password_reset(db, payload.email)
         db.commit()
@@ -633,7 +790,7 @@ def auth_password_reset_confirm(
     request: Request,
     db: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    _enforce_auth_rate_limit(request)
+    _enforce_auth_rate_limit(request, category="auth_password_reset")
     try:
         user = confirm_password_reset(db, payload.token, payload.new_password)
         db.commit()
@@ -920,9 +1077,70 @@ def update_workspace_member_role(
     return {"workspace_id": ws.id, "user_id": target_id, "role": member.role}
 
 
+@app.delete("/v1/workspaces/{workspace_id}/members/{member_user_id}")
+def remove_workspace_member(
+    workspace_id: uuid.UUID,
+    member_user_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Remove a non-owner workspace member enforcing RBAC hierarchy."""
+    ws, actor_member = require_workspace_role(
+        db,
+        workspace_id=str(workspace_id),
+        user=current_user,
+        minimum_role="admin",
+    )
+    target_id = str(member_user_id)
+    if target_id == ws.owner_id:
+        raise HTTPException(status_code=400, detail="Cannot remove the workspace owner.")
+
+    target_member = db.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == ws.id,
+            WorkspaceMember.user_id == target_id,
+        )
+    )
+    if target_member is None:
+        raise HTTPException(status_code=404, detail="Member not found in workspace.")
+    if target_member.role == "admin" and actor_member.role != "owner":
+        raise HTTPException(
+            status_code=403,
+            detail="Only the workspace owner can remove an admin.",
+        )
+
+    db.delete(target_member)
+    db.commit()
+    log_audit_event(
+        "workspace_member_removed",
+        user_id=current_user.id,
+        workspace_id=ws.id,
+        ip_address=get_client_ip(request),
+        details={"removed_user_id": target_id},
+    )
+    return {"removed": True, "workspace_id": ws.id, "user_id": target_id}
+
+
 # ---------------------------------------------------------------------------
 # Credit Packages, Stripe Checkout, Webhooks & Controlled Admin Adjustments
 # ---------------------------------------------------------------------------
+
+
+@app.get("/v1/workspaces/{workspace_id}/credits/reconcile")
+def reconcile_workspace_credit_ledger(
+    workspace_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Verify Workspace credit balance invariants against immutable CreditLedger rows."""
+    ws, _ = require_workspace_role(
+        db,
+        workspace_id=str(workspace_id),
+        user=current_user,
+        minimum_role="member",
+    )
+    return reconcile_workspace_credits(db, ws.id)
 
 
 @app.get("/v1/billing/packages")
@@ -934,9 +1152,17 @@ def list_credit_packages() -> dict[str, Any]:
 def checkout_credits(
     workspace_id: uuid.UUID,
     payload: CreditCheckoutRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    _enforce_rate_limit(
+        request,
+        "billing_checkout",
+        current_user.id,
+        settings.get_rate_limit("billing_checkout"),
+        burst_limit=max(5, settings.get_rate_limit("billing_checkout") // 2),
+    )
     ws, _ = require_workspace_role(
         db,
         workspace_id=str(workspace_id),
@@ -958,6 +1184,7 @@ def checkout_credits(
     except BillingError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    metrics_registry.incr("billing.checkout_created")
     return {
         "id": ws.id,
         "checkout_mode": "stripe_checkout_session",
@@ -1213,9 +1440,16 @@ def list_workspace_assets(
 @app.get("/v1/assets/{asset_id}")
 def download_workspace_asset(
     asset_id: uuid.UUID,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ) -> FileResponse:
+    _enforce_rate_limit(
+        request,
+        "file_download",
+        current_user.id,
+        settings.get_rate_limit("file_download"),
+    )
     asset = db.get(WorkspaceAsset, str(asset_id))
     if asset is None:
         raise HTTPException(status_code=404, detail="Asset not found.")
@@ -1248,7 +1482,11 @@ def scrape_product(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     _enforce_rate_limit(
-        request, "scrape_user", current_user.id, int(settings.RATE_LIMIT_API_PER_MINUTE)
+        request,
+        "product_scrape",
+        current_user.id,
+        settings.get_rate_limit("product_scrape"),
+        burst_limit=max(10, settings.get_rate_limit("product_scrape") // 2),
     )
     try:
         return scrape_product_url(
@@ -1271,7 +1509,13 @@ def generate_video(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ) -> VideoJobResponse:
-    _enforce_rate_limit(request, "generate_user", current_user.id, 30)
+    _enforce_rate_limit(
+        request,
+        "video_generate",
+        current_user.id,
+        settings.get_rate_limit("video_generate"),
+        burst_limit=max(20, settings.get_rate_limit("video_generate")),
+    )
     ws, _ = require_workspace_role(
         db,
         workspace_id=str(payload.workspace_id),
@@ -1310,6 +1554,7 @@ def generate_video(
             detail="Live Vertex AI Veo supports duration_seconds values of 4, 6, or 8.",
         )
 
+    correlation_id = getattr(request.state, "request_id", None)
     job_id = str(uuid.uuid4())
     now = utcnow()
     job = VideoJob(
@@ -1321,6 +1566,7 @@ def generate_video(
         aspect_ratio=payload.aspect_ratio,
         duration_seconds=int(round(payload.duration_seconds)),
         idempotency_key=resolved_idem,
+        correlation_id=str(correlation_id)[:64] if correlation_id else None,
         status="CREATED",
         progress_pct=5,
         stage_detail="Created — reserving workspace credit",
@@ -1375,20 +1621,25 @@ def generate_video(
     db.commit()
 
     try:
-        process_video_job.delay(
+        dispatch_video_job(
             job_id=job_id,
             ad_angle=payload.ad_angle,
             simulate_failure=payload.simulate_failure,
             custom_props=payload.custom_props,
             duration_seconds=payload.duration_seconds,
             aspect_ratio=payload.aspect_ratio,
+            correlation_id=correlation_id,
         )
-    except Exception as exc:
+    except (BrokerUnavailableError, Exception) as exc:
         db.rollback()
         failed = db.get(VideoJob, job_id)
         if failed is not None:
             failed.status = "FAILED"
-            failed.error_code = "QUEUE_DISPATCH_FAILED"
+            failed.error_code = (
+                "BROKER_UNAVAILABLE"
+                if isinstance(exc, BrokerUnavailableError)
+                else "QUEUE_DISPATCH_FAILED"
+            )
             failed.error_message = "Could not enqueue background render job; credit refunded."
             failed.stage_detail = "Dispatch failed"
             failed.updated_at = utcnow()
@@ -1401,6 +1652,7 @@ def generate_video(
             reason=f"Queue dispatch failed: {type(exc).__name__}",
         )
         db.commit()
+        metrics_registry.incr("jobs.dispatch_failed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Background render queue unavailable; reserved credit has been refunded.",
@@ -1522,6 +1774,12 @@ def retry_video_job(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ) -> VideoJobResponse:
+    _enforce_rate_limit(
+        request,
+        "video_render_retry",
+        current_user.id,
+        settings.get_rate_limit("video_render_retry"),
+    )
     prev_job = db.get(VideoJob, str(job_id))
     if prev_job is None:
         raise HTTPException(status_code=404, detail="Video job not found.")
@@ -1564,9 +1822,16 @@ def retry_video_job(
 @app.get("/v1/videos/{job_id}/signed-url")
 def get_signed_video_url(
     job_id: uuid.UUID,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    _enforce_rate_limit(
+        request,
+        "file_download",
+        current_user.id,
+        settings.get_rate_limit("file_download"),
+    )
     job = db.get(VideoJob, str(job_id))
     if job is None:
         raise HTTPException(status_code=404, detail="Video job not found.")
@@ -1595,6 +1860,12 @@ def download_video_render(
     db: Session = Depends(get_session),
 ) -> FileResponse:
     """Stream completed video strictly from workspace private storage after authorization."""
+    _enforce_rate_limit(
+        request,
+        "file_download",
+        get_client_ip(request),
+        settings.get_rate_limit("file_download"),
+    )
     job = db.get(VideoJob, str(job_id))
     if job is None:
         raise HTTPException(status_code=404, detail="Video job not found.")

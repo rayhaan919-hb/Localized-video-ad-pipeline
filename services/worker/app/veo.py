@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import base64
+import os
 import shutil
 import subprocess
+import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +22,7 @@ from app.storage import VideoValidationError, validate_mp4_file
 
 SAMPLE_FIXTURE_PATH = FIXTURES_DIR / "sample_9_16.mp4"
 VALID_ASPECT_RATIOS = {"9:16", "16:9"}
+_FIXTURE_LOCK = threading.Lock()
 VALID_VEO_DURATIONS = {4, 6, 8}
 VALID_VEO_MODELS = {
     "veo-3.1-generate-001",
@@ -78,36 +82,44 @@ def ensure_sample_fixture(
         "drawbox=x=24:y=120:w=iw-48:h=ih-280:color=0x18181B@0.92:t=fill,"
         "drawbox=x=24:y=120:w=iw-48:h=4:color=0x6366F1@0.95:t=fill"
     )
-    cmd = [
-        ffmpeg_exe,
-        "-y",
-        "-f",
-        "lavfi",
-        "-i",
-        f"color=c=0x09090B:size={size_expr}:rate=30",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=220:sample_rate=24000",
-        "-t",
-        f"{dur:.2f}",
-        "-vf",
-        studio_bg_filter,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "96k",
-        "-movflags",
-        "+faststart",
-        str(target),
-    ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with _FIXTURE_LOCK:
+        if target.exists() and target.stat().st_size > 1024:
+            return target
+        tmp_target = target.with_name(f".{target.stem}.{uuid.uuid4().hex[:8]}.tmp.mp4")
+        cmd = [
+            ffmpeg_exe,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=0x09090B:size={size_expr}:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=220:sample_rate=24000",
+            "-t",
+            f"{dur:.2f}",
+            "-vf",
+            studio_bg_filter,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            "-movflags",
+            "+faststart",
+            str(tmp_target),
+        ]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os.replace(tmp_target, target)
+        finally:
+            tmp_target.unlink(missing_ok=True)
     return target
 
 

@@ -6,6 +6,7 @@ from sqlalchemy import Engine, inspect, text
 
 MIGRATION_VERSION = "002_saas_multi_tenant_auth_billing"
 MIGRATION_VERSION_003 = "003_google_oauth_identity"
+MIGRATION_VERSION_004 = "004_job_leases_and_immutability"
 
 _LEGACY_USER_COLUMN_DEFAULTS = {
     "auth_provider": "VARCHAR(32) NOT NULL DEFAULT 'password'",
@@ -24,6 +25,11 @@ _LEGACY_JOB_COLUMN_DEFAULTS = {
     "error_message": "TEXT",
     "reserved_credits": "INTEGER NOT NULL DEFAULT 1",
     "retry_count": "INTEGER NOT NULL DEFAULT 0",
+    "worker_id": "VARCHAR(128)",
+    "lease_expires_at": "TIMESTAMP",
+    "heartbeat_at": "TIMESTAMP",
+    "fencing_token": "INTEGER NOT NULL DEFAULT 0",
+    "correlation_id": "VARCHAR(64)",
     "updated_at": "TIMESTAMP",
     "completed_at": "TIMESTAMP",
 }
@@ -67,7 +73,7 @@ def _add_missing_columns(
                 ddl = "JSONB"
             elif col_name in ("user_id", "job_id"):
                 ddl = "UUID"
-            elif col_name in ("updated_at", "completed_at"):
+            elif col_name in ("updated_at", "completed_at", "lease_expires_at", "heartbeat_at"):
                 ddl = "TIMESTAMPTZ"
         conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {ddl}"))
 
@@ -118,6 +124,11 @@ def _sqlite_rebuild_video_jobs_if_old_check(conn) -> None:
                   error_message TEXT,
                   reserved_credits INTEGER NOT NULL DEFAULT 1,
                   retry_count INTEGER NOT NULL DEFAULT 0,
+                  worker_id VARCHAR(128),
+                  lease_expires_at TIMESTAMP,
+                  heartbeat_at TIMESTAMP,
+                  fencing_token INTEGER NOT NULL DEFAULT 0,
+                  correlation_id VARCHAR(64),
                   created_at TIMESTAMP NOT NULL,
                   updated_at TIMESTAMP,
                   completed_at TIMESTAMP
@@ -145,6 +156,11 @@ def _sqlite_rebuild_video_jobs_if_old_check(conn) -> None:
             "error_message",
             "reserved_credits",
             "retry_count",
+            "worker_id",
+            "lease_expires_at",
+            "heartbeat_at",
+            "fencing_token",
+            "correlation_id",
             "created_at",
             "updated_at",
             "completed_at",
@@ -231,10 +247,33 @@ def run_migrations(engine: Engine, metadata) -> None:
             )
             conn.execute(
                 text(
+                    "CREATE INDEX IF NOT EXISTS idx_video_jobs_status_lease "
+                    "ON video_jobs (status, lease_expires_at)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_video_jobs_correlation_id "
+                    "ON video_jobs (correlation_id)"
+                )
+            )
+            conn.execute(
+                text(
                     "CREATE INDEX IF NOT EXISTS idx_credit_ledger_workspace_created_at "
                     "ON credit_ledger (workspace_id, created_at DESC)"
                 )
             )
+            if dialect == "sqlite":
+                conn.execute(
+                    text(
+                        "CREATE TRIGGER IF NOT EXISTS trg_credit_ledger_no_delete "
+                        "BEFORE DELETE ON credit_ledger "
+                        "BEGIN "
+                        "SELECT RAISE(ABORT, "
+                        "'credit_ledger rows are immutable and cannot be deleted'); "
+                        "END"
+                    )
+                )
             if "users" in tables:
                 conn.execute(
                     text(
@@ -243,21 +282,13 @@ def run_migrations(engine: Engine, metadata) -> None:
                     )
                 )
 
-        already = conn.execute(
-            text("SELECT version FROM schema_migrations WHERE version = :v"),
-            {"v": MIGRATION_VERSION},
-        ).fetchone()
-        if not already:
-            conn.execute(
-                text("INSERT INTO schema_migrations (version) VALUES (:v)"),
-                {"v": MIGRATION_VERSION},
-            )
-        already_003 = conn.execute(
-            text("SELECT version FROM schema_migrations WHERE version = :v"),
-            {"v": MIGRATION_VERSION_003},
-        ).fetchone()
-        if not already_003:
-            conn.execute(
-                text("INSERT INTO schema_migrations (version) VALUES (:v)"),
-                {"v": MIGRATION_VERSION_003},
-            )
+        for version_tag in (MIGRATION_VERSION, MIGRATION_VERSION_003, MIGRATION_VERSION_004):
+            already = conn.execute(
+                text("SELECT version FROM schema_migrations WHERE version = :v"),
+                {"v": version_tag},
+            ).fetchone()
+            if not already:
+                conn.execute(
+                    text("INSERT INTO schema_migrations (version) VALUES (:v)"),
+                    {"v": version_tag},
+                )

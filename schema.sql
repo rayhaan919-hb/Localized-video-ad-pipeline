@@ -98,6 +98,11 @@ CREATE TABLE IF NOT EXISTS video_jobs (
   error_message TEXT,
   reserved_credits INTEGER NOT NULL DEFAULT 1,
   retry_count INTEGER NOT NULL DEFAULT 0,
+  worker_id TEXT,
+  lease_expires_at TIMESTAMPTZ,
+  heartbeat_at TIMESTAMPTZ,
+  fencing_token INTEGER NOT NULL DEFAULT 0,
+  correlation_id TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   completed_at TIMESTAMPTZ,
@@ -106,7 +111,7 @@ CREATE TABLE IF NOT EXISTS video_jobs (
 
 CREATE TABLE IF NOT EXISTS credit_ledger (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
   user_id UUID REFERENCES users(id) ON DELETE SET NULL,
   job_id UUID REFERENCES video_jobs(id) ON DELETE SET NULL,
   payment_id TEXT,
@@ -150,19 +155,46 @@ CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions (user_id);
 CREATE INDEX IF NOT EXISTS idx_workspace_members_user_id ON workspace_members (user_id);
 CREATE INDEX IF NOT EXISTS idx_workspace_assets_workspace_id ON workspace_assets (workspace_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_video_jobs_workspace_created_at ON video_jobs (workspace_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_video_jobs_status_lease ON video_jobs (status, lease_expires_at);
+CREATE INDEX IF NOT EXISTS idx_video_jobs_correlation_id ON video_jobs (correlation_id);
 CREATE INDEX IF NOT EXISTS idx_credit_ledger_workspace_created_at ON credit_ledger (workspace_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stripe_events_payment_intent ON stripe_events (payment_intent_id);
 
+-- Financial audit ledger immutability guard
+CREATE OR REPLACE FUNCTION public.prevent_credit_ledger_delete()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'credit_ledger rows are immutable and cannot be deleted';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_credit_ledger_no_delete ON credit_ledger;
+CREATE TRIGGER trg_credit_ledger_no_delete
+  BEFORE DELETE ON credit_ledger
+  FOR EACH ROW
+  EXECUTE FUNCTION public.prevent_credit_ledger_delete();
+
 -- Supabase Row-Level Security (RLS) multi-tenant policies
 ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE schema_migrations FORCE ROW LEVEL SECURITY;
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE users FORCE ROW LEVEL SECURITY;
 ALTER TABLE auth_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE auth_sessions FORCE ROW LEVEL SECURITY;
 ALTER TABLE stripe_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE stripe_events FORCE ROW LEVEL SECURITY;
 ALTER TABLE workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspaces FORCE ROW LEVEL SECURITY;
 ALTER TABLE workspace_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspace_members FORCE ROW LEVEL SECURITY;
 ALTER TABLE workspace_assets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspace_assets FORCE ROW LEVEL SECURITY;
 ALTER TABLE video_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE video_jobs FORCE ROW LEVEL SECURITY;
 ALTER TABLE credit_ledger ENABLE ROW LEVEL SECURITY;
+ALTER TABLE credit_ledger FORCE ROW LEVEL SECURITY;
 
 -- Security-definer helpers prevent infinite RLS recursion on workspace_members
 CREATE OR REPLACE FUNCTION public.is_workspace_member(target_workspace_id UUID)

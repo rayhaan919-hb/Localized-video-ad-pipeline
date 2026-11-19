@@ -19,6 +19,7 @@ const ALLOWED_POST_PATHS = new Set([
   'login',
   'refresh',
   'logout',
+  'logout-all',
   'verify-email',
   'password-reset/request',
   'password-reset/confirm',

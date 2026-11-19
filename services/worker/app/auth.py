@@ -509,6 +509,19 @@ def revoke_refresh_session(session: Session, refresh_token: str | None) -> None:
         session.flush()
 
 
+def revoke_all_user_sessions(session: Session, user_id: str) -> int:
+    """Revoke every active refresh session belonging to user_id."""
+    uid_str = str(uuid.UUID(str(user_id)))
+    now = utcnow()
+    res = session.execute(
+        update(AuthSession)
+        .where(AuthSession.user_id == uid_str, AuthSession.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    session.flush()
+    return int(res.rowcount or 0)
+
+
 def extract_bearer_or_cookie_token(request: Request) -> str | None:
     """Read JWT access token from Authorization header or HttpOnly session cookie."""
     auth_header = request.headers.get("authorization", "").strip()
@@ -550,6 +563,12 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authenticated user record not found.",
             headers={"WWW-Authenticate": "Bearer"},
+        )
+    locked_until = _as_utc(user.locked_until)
+    if locked_until is not None and locked_until > utcnow():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is temporarily locked due to repeated security failures.",
         )
     return user
 
