@@ -2,7 +2,7 @@
 
 **Product:** Localized AI Video Ad Pipeline (Non-English D2C SaaS)  
 **Assessment Verdict:** **`CONDITIONAL GO — READY FOR STAGING SIGN-OFF`**  
-*(Historical baseline summary from v2.0.0; see [`AUDIT/FINAL_PRODUCTION_READINESS_REPORT.md`](./AUDIT/FINAL_PRODUCTION_READINESS_REPORT.md) and [`AUDIT/FINAL_HARDENING_ACTION_PLAN.md`](./AUDIT/FINAL_HARDENING_ACTION_PLAN.md) alongside the `v2.2.0` hardening reports in `AUDIT/` for current evidence.)*  
+*(Historical baseline summary from v2.0.0; see [`AUDIT/FINAL_HARDENING_REPORT.md`](./AUDIT/FINAL_HARDENING_REPORT.md), [`AUDIT/PRODUCTION_TEST_RESULTS.md`](./AUDIT/PRODUCTION_TEST_RESULTS.md), and [`AUDIT/FINAL_READINESS_SCORECARD.md`](./AUDIT/FINAL_READINESS_SCORECARD.md) for current `v2.2.0` hardening evidence.)*  
 **Scope:** Application architecture, security & multi-tenant isolation, credit ledger & Stripe billing, AI & FFmpeg video pipeline, Next.js Creator Studio BFF + UI, database migrations/RLS, CI workflow, and automated verification.
 
 ---
@@ -12,7 +12,7 @@
 The codebase has been upgraded from a single-tenant mock-first prototype into an isolated multi-tenant SaaS application with server-side authentication, workspace RBAC (`owner`/`admin`/`member`), transactional credit accounting, server-authoritative Stripe Checkout and signed webhook processing, SSRF-protected honest product scraping, strict live Vertex AI Veo / Cloud TTS integrations, private workspace media storage with signed downloads, transactional outbox + DB-clock atomic worker leases, and fail-closed production startup validation.
 
 **Verdict — `CONDITIONAL GO`:**  
-At the initial `v2.0.0` commercial hardening baseline (`27/27` worker tests, `5/5` studio tests under Next.js `16.4.6` / React `19.3.1` / Remotion `4.0.545`), all core security & isolation fixes passed locally; subsequent `v2.1.0` & `v2.2.0` hardening expanded test coverage, upgraded CI to Node 24 SHA-pinned actions with live PostgreSQL 16 + Redis 7 service jobs, and resolved queued-job recovery & heartbeat races (tracked in [`TESTING_GUIDE.md`](./TESTING_GUIDE.md) and `AUDIT/PRODUCTION_TEST_RESULTS.md`). Live external integrations remain gated on buyer staging credentials (`PostgreSQL`, `Redis`, `Stripe`, `GCP`, `SMTP`).
+At the initial `v2.0.0` commercial hardening baseline (`27/27` worker tests, `5/5` studio tests under Next.js `16.4.6` / React `19.3.1` / Remotion `4.0.545`), all core security & isolation fixes passed locally; subsequent `v2.1.0` & `v2.2.0` hardening expanded test coverage, upgraded CI to Node 24 SHA-pinned actions with live PostgreSQL 16 + Redis 7 service jobs, and resolved queued-job recovery & heartbeat races (see [`AUDIT/PRODUCTION_TEST_RESULTS.md`](./AUDIT/PRODUCTION_TEST_RESULTS.md)). Live external integrations remain gated on buyer staging credentials (`PostgreSQL`, `Redis`, `Stripe`, `GCP`, `SMTP`).
 
 ---
 
