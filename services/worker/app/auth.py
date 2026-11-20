@@ -519,7 +519,7 @@ def revoke_all_user_sessions(session: Session, user_id: str) -> int:
         .values(revoked_at=now)
     )
     session.flush()
-    return int(res.rowcount or 0)
+    return int(getattr(res, "rowcount", 0) or 0)
 
 
 def extract_bearer_or_cookie_token(request: Request) -> str | None:

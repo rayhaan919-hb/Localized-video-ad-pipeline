@@ -384,7 +384,7 @@ def _apply_outbox_dispatch_failure(
                     updated_at=now_sql,
                 )
             )
-            if int(upd_fail.rowcount or 0) == 1:
+            if int(getattr(upd_fail, "rowcount", 0) or 0) == 1:
                 refund_credit_atomically(
                     session,
                     workspace_id=job.workspace_id,
@@ -747,7 +747,9 @@ def _execute_leased_job_attempt(
                 history.append(new_status)
             existing_row = session.get(VideoJob, normalized_job_id)
             next_script = (
-                dict(script) if script is not None else dict((existing_row.script_json or {}))
+                dict(script)
+                if script is not None
+                else dict((existing_row.script_json if existing_row is not None else None) or {})
             )
             next_script["status_history"] = list(history)
             if stage_timings_ms:
@@ -771,7 +773,7 @@ def _execute_leased_job_attempt(
                     updated_at=now_sql,
                 )
             )
-            if int(res.rowcount or 0) == 0:
+            if int(getattr(res, "rowcount", 0) or 0) == 0:
                 session.rollback()
                 raise StaleWorkerLeaseError(
                     f"Worker '{owner_id}' lost fencing lock (token={fencing_token}) "
@@ -990,7 +992,7 @@ def _execute_leased_job_attempt(
                     updated_at=now_sql,
                 )
             )
-            if int(upd_res.rowcount or 0) == 0:
+            if int(getattr(upd_res, "rowcount", 0) or 0) == 0:
                 resolve_workspace_rel_path(workspace_id, asset.storage_rel_path).unlink(
                     missing_ok=True
                 )
@@ -1124,7 +1126,7 @@ def _execute_leased_job_attempt(
                     )
                 )
                 session.commit()
-                if int(upd_retry.rowcount or 0) > 0:
+                if int(getattr(upd_retry, "rowcount", 0) or 0) > 0:
                     metrics_registry.incr("jobs.retried")
                     log_audit_event(
                         "video_job_retry_scheduled",
@@ -1185,7 +1187,7 @@ def _execute_leased_job_attempt(
                 )
             )
             refunded_balance = None
-            if int(upd_fail.rowcount or 0) > 0:
+            if int(getattr(upd_fail, "rowcount", 0) or 0) > 0:
                 refunded_balance = refund_credit_atomically(
                     session,
                     workspace_id=workspace_id,
@@ -1376,7 +1378,7 @@ def recover_expired_leases(min_age_seconds: int | None = None) -> int:
                     updated_at=now_sql,
                 )
             )
-            if int(upd.rowcount or 0) != 1:
+            if int(getattr(upd, "rowcount", 0) or 0) != 1:
                 job_session.rollback()
                 continue
 

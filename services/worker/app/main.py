@@ -1765,7 +1765,7 @@ def cancel_video_job(
             updated_at=now_sql,
         )
     )
-    if int(upd.rowcount or 0) != 1:
+    if int(getattr(upd, "rowcount", 0) or 0) != 1:
         db.rollback()
         latest = db.get(VideoJob, job.id)
         cur_status = latest.status if latest else "UNKNOWN"

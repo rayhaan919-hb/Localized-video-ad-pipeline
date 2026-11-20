@@ -1159,7 +1159,7 @@ def renew_job_lease(
             updated_at=now_sql,
         )
     )
-    return int(res.rowcount or 0) > 0
+    return int(getattr(res, "rowcount", 0) or 0) > 0
 
 
 def release_job_lease(
@@ -1185,7 +1185,7 @@ def release_job_lease(
             updated_at=now_sql,
         )
     )
-    return int(res.rowcount or 0) > 0
+    return int(getattr(res, "rowcount", 0) or 0) > 0
 
 
 def reconcile_workspace_credits(session: Session, workspace_id: str | uuid.UUID) -> dict[str, Any]:
