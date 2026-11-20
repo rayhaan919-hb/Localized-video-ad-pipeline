@@ -6,6 +6,7 @@ import {
   assertSameOriginRequest,
   buildWorkerForwardHeaders,
   extractCookieValue,
+  forwardWorkerJsonResponse,
   isValidUuid,
   normalizeVideoJob,
   stripAuthTokensFromPayload,
@@ -367,4 +368,17 @@ test('Hardening Phase 9-13: BFF logout-all, X-Request-ID propagation, and CI sec
   );
   assert.equal(serverStoreText.includes('workerUnavailableResponse'), true);
   assert.equal(serverStoreText.includes('status: 503'), true);
+});
+
+test('BFF forwardWorkerJsonResponse echoes worker X-Request-ID header to browser', async () => {
+  const workerResp = new Response(JSON.stringify({ ok: true }), {
+    status: 202,
+    headers: {
+      'content-type': 'application/json',
+      'x-request-id': 'corr-bff-echo-789',
+    },
+  });
+  const nextResp = await forwardWorkerJsonResponse(workerResp);
+  assert.equal(nextResp.status, 202);
+  assert.equal(nextResp.headers.get('x-request-id'), 'corr-bff-echo-789');
 });

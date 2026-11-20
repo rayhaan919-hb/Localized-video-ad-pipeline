@@ -275,6 +275,10 @@ export async function forwardWorkerJsonResponse(
       : workerRes.status;
 
   const response = NextResponse.json(finalPayload, { status: statusCode });
+  const requestId = workerRes.headers.get('x-request-id');
+  if (requestId) {
+    response.headers.set('x-request-id', requestId);
+  }
   if (options.forwardCookies) {
     copySetCookieHeaders(workerRes.headers, response.headers);
   }

@@ -61,6 +61,10 @@ export async function GET(
   if (contentLength) {
     headers['Content-Length'] = contentLength;
   }
+  const requestId = workerRes.headers.get('x-request-id');
+  if (requestId) {
+    headers['X-Request-ID'] = requestId;
+  }
 
   return new NextResponse(workerRes.body, {
     status: 200,
