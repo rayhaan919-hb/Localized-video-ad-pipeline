@@ -4,35 +4,33 @@ This guide lists the exact commands used to verify **Localized AI Video Ad Pipel
 
 ---
 
-## 1. Python Worker Lint & Automated Test Suite (`services/worker`)
+## 1. Python Worker Lint, Typecheck & Automated Test Suite (`services/worker`)
 
-Run linting and all 36 automated tests:
+Run linting, static type checks, and automated suites:
 
 ```bash
 cd services/worker
 ruff check .
+mypy app --ignore-missing-imports
 pytest -v
 ```
 
 *(On Windows with standalone `uv` pytest toolchain: `C:\Users\Admin\AppData\Roaming\uv\tools\pytest\Scripts\python.exe -m pytest -v`.)*
 
-### Test Suite Coverage (`36` collected items)
-1. [test_hardening_phases.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/tests/test_hardening_phases.py) (**7 tests**):
-   - Phase 2: Fail-closed `validate_production_config()`, forbid silent `memory://` / eager fallback in production, `503` + clean credit refund when Redis is down, transient vs permanent classification, jittered exponential backoff (`compute_retry_countdown`), retry -> success without duplicate charges.
-   - Phase 3: Worker leases (`acquire_job_lease`, `renew_job_lease`), `_LeaseHeartbeatThread`, fencing token enforcement (`StaleWorkerLeaseError`), long-running active lease preservation under `recover_interrupted_jobs()`, expired lease reclamation + single idempotent refund, duplicate delivery prevention.
-   - Phase 4: Distributed multi-instance rate limiting (`DistributedRateLimiter` + shared store semantics across independent instances), burst protection, and `429` + `Retry-After` across endpoints.
-   - Phase 5: Connection-pinned SSRF protection (`SSRFSafeNetworkBackend`), private/loopback/CGNAT/link-local/metadata/IPv6-mapped/obfuscated-IP blocking, DNS rebinding simulation, redirect chain revalidation, stream byte caps (`Accept-Encoding: identity`), and Content-Type validation.
-   - Phases 6–11: Out-of-order `charge.refunded` -> `checkout.session.completed` reconciliation, ORM/SQL `credit_ledger` immutability, `reconcile_workspace_credits`, PostgreSQL engine pool config, locked-account JWT rejection (`403`), `POST /v1/auth/logout-all`, `DELETE /v1/workspaces/{id}/members/{uid}` hierarchy RBAC, `X-Request-ID` -> `VideoJob.correlation_id`, `/health`, `/v1/ops/metrics`.
-   - Concurrency Stress: 10-thread parallel generation + lease/credit invariant check (`credit_balance == 0`, `reserved_balance == 0`, `is_balanced == True`).
-   - Phase 10 Failure Modes: Live Veo configuration errors, expired credential `401` handling, and gated `STAGING_LIVE_TESTS=1` probe.
-2. [test_security_billing_ai.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/tests/test_security_billing_ai.py) (**18 items**): Multi-tenant auth, refresh reuse revocation, lockout, cross-workspace isolation, RBAC, concurrent credit reservation races, Stripe HMAC webhook signatures/idempotency/partial refunds, fail-closed startup checks, live GCS/Veo/TTS error boundaries, SSRF targets, legacy SQLite non-destructive upgrade, Google OAuth PKCE S256, and disposable email blocking.
-3. [test_worker.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/tests/test_worker.py) (**11 items**): `/health`, all 4 languages (`ur`, `ar`, `hi`, `en`) + RTL typography, `402` insufficient credits, failure refund atomicity, idempotency key deduplication, honest scraping without fabricated prices, and real FFmpeg composited MP4 + custom props verification.
+### Test Suite Coverage (`43` local passing tests + `6` env-gated external integration tests)
+1. [`test_hardening_phases.py`](./services/worker/tests/test_hardening_phases.py) (**7 tests**): Fail-closed broker checks, lease heartbeat & fencing barriers, distributed Redis Lua counter semantics, connection-pinned SSRF blocking, out-of-order Stripe refund reconciliation, locked-JWT/logout-all/member-delete RBAC, 10-thread concurrency stress, and transient/config boundaries.
+2. [`test_queued_and_lease_races.py`](./services/worker/tests/test_queued_and_lease_races.py) (**4 tests**): Queued job preservation beyond recovery thresholds, heavy queue congestion survival, transactional dispatch outbox retry/reconciliation/cancel guards, and barrier-synchronized DB-clock heartbeat-vs-recovery & dual-recovery race tests.
+3. [`test_staging_integrations.py`](./services/worker/tests/test_staging_integrations.py) (**3 local contract tests + 2 env-gated staging tests**): Stripe webhook HMAC tamper/replay/idempotency/refund contracts, fail-closed missing-credential checks for Stripe/Veo/TTS, retryable vs permanent error classification, plus `STRIPE_STAGING_TEST=1` & `GCP_STAGING_TEST=1` live smoke checks.
+4. [`test_postgres_integration.py`](./services/worker/tests/test_postgres_integration.py) (**env-gated `TEST_POSTGRES_URL`, 5 tests**): Live PostgreSQL 16 migrations `001`–`005`, `FORCE ROW LEVEL SECURITY` catalog checks, trigger/FK delete blocks, 12-thread concurrent reservation contention, `clock_timestamp()` + `FOR UPDATE SKIP LOCKED` lease races, and temporary `NOBYPASSRLS` role audit + Tenant A/B/anon RLS verification.
+5. [`test_redis_celery_recovery.py`](./services/worker/tests/test_redis_celery_recovery.py) (**env-gated `TEST_REDIS_URL`, 3 tests**): Live Redis Lua distributed rate limiting across instances, real Celery worker subprocess queued congestion + duplicate delivery protection, and `SIGKILL` worker lease expiry + outbox relay recovery.
+6. [`test_security_billing_ai.py`](./services/worker/tests/test_security_billing_ai.py) (**18 items**): Multi-tenant auth, refresh reuse revocation, lockout, cross-workspace isolation, RBAC, concurrent credit reservation races, Stripe HMAC webhook signatures/idempotency/partial refunds, fail-closed startup checks, live GCS/Veo/TTS error boundaries, SSRF targets, legacy SQLite non-destructive upgrade, Google OAuth PKCE S256, and disposable email blocking.
+7. [`test_worker.py`](./services/worker/tests/test_worker.py) (**11 items**): `/health`, all 4 languages (`ur`, `ar`, `hi`, `en`) + RTL typography, `402` insufficient credits, failure refund atomicity, idempotency key deduplication, honest scraping without fabricated prices, and real FFmpeg composited MP4 + custom props verification.
 
 ---
 
 ## 2. Database Migration Smoke Verification
 
-Verify schema creation and idempotent migrations (`001` through `004`) against an isolated SQLite database:
+Verify schema creation and idempotent migrations (`001` through `005`) against an isolated SQLite database:
 
 ```bash
 cd services/worker
@@ -40,7 +38,7 @@ APP_ENV=test DATABASE_URL="sqlite:///./migration_smoke.db" python -c "from app.d
 rm -f migration_smoke.db
 ```
 
-Expected applied versions: `001_initial_schema`, `002_saas_multi_tenant_auth_billing`, `003_google_oauth_identity`, `004_job_leases_and_immutability`.
+Expected applied versions: `002_saas_multi_tenant_auth_billing`, `003_google_oauth_identity`, `004_job_leases_and_immutability`, `005_transactional_outbox_and_rls_hardening`.
 
 ---
 
@@ -53,7 +51,7 @@ npm run verify:remotion
 npm run verify:studio
 ```
 
-`verify:studio` runs `tsc --noEmit`, `eslint "src/**/*.{ts,tsx}" --max-warnings 0`, [studio.test.ts](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/apps/studio/src/__tests__/studio.test.ts) (`9/9` Node unit/BFF security tests), and a full Next.js `16.4.6` production build.
+`verify:studio` runs `tsc --noEmit`, `eslint "src/**/*.{ts,tsx}" --max-warnings 0`, [`studio.test.ts`](./apps/studio/src/__tests__/studio.test.ts) (`10/10` Node unit/BFF security & `X-Request-ID` tests), and a full Next.js `16.4.6` production build.
 
 ---
 
@@ -63,7 +61,7 @@ npm run verify:studio
 # Production NPM dependency audit (high/critical gate)
 npm audit --omit=dev --audit-level=high
 
-# Python CVE audit (excludes local editable package; requires dev extras, enforced in CI)
+# Python CVE audit (excludes local editable package; enforces third-party CVEs)
 cd services/worker
 python -m pip freeze --exclude-editable | grep -ivE '^(localized[-_]video[-_]ad[-_]worker([= <>~!@]|$)|.*@ file://)' > /tmp/pip-audit-reqs.txt
 test -s /tmp/pip-audit-reqs.txt
@@ -71,24 +69,22 @@ pip-audit --no-deps --disable-pip --strict --desc -r /tmp/pip-audit-reqs.txt
 rm -f /tmp/pip-audit-reqs.txt
 ```
 
-CI ([.github/workflows/ci.yml](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/.github/workflows/ci.yml)) additionally runs secret pattern scanning across `apps/`, `packages/`, `services/`, and `schema.sql`.
+CI ([`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) runs SHA-pinned Node 24 actions, `mypy`, live PostgreSQL 16 + Redis 7 service integration tests, and secret pattern scanning across `apps/`, `packages/`, `services/`, and `schema.sql`.
 
 ---
 
-## 5. Performance & Concurrency Benchmark Suite (`services/worker/scripts/run_benchmarks.py`)
+## 5. Concurrency & Staging Benchmarks (`run_benchmarks.py` / `run_staging_benchmarks.py`)
 
 Execute reproducible multi-threaded benchmarks with `tracemalloc` memory tracking and automatic post-load credit ledger reconciliation:
 
 ```bash
 cd services/worker
+# Legacy single-host SQLite + FFmpeg benchmark
 python scripts/run_benchmarks.py
-```
 
-Latest verified baseline (Windows host, `0.0%` errors across all 4 scenarios, `is_balanced: true`, peak traced heap `6.07 MB`):
-- `concurrent_register_20` (8 threads, PBKDF2 260k): `20` reqs, `0` errors, `5.78 rps`, `p50=1072.23ms`, `p95=1801.9ms`
-- `concurrent_credit_reservations_30` (12 threads): `30` reqs, `0` errors, `34.0 rps`, `p50=76.39ms`, `p95=717.82ms`
-- `concurrent_e2e_video_render_6` (4 threads, mock Veo + WAV TTS + real FFmpeg): `6` reqs, `0` errors, `p50=44174.6ms`, `p95=44349.67ms`
-- `concurrent_signed_downloads_20` (8 threads): `20` reqs, `0` errors, `11.53 rps`, `p50=553.79ms`, `p95=1092.33ms`
+# Multi-tier staging benchmark (requires PostgreSQL + Redis in staging, or --local-dry-run for SQLite)
+python scripts/run_staging_benchmarks.py --local-dry-run --tiers 10,25
+```
 
 ---
 

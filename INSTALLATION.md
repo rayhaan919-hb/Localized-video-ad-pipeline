@@ -9,7 +9,7 @@ This guide covers setting up **Localized AI Video Ad Pipeline** cleanly for loca
 | Dependency | Minimum Version | Purpose |
 |---|---|---|
 | Python | `3.12+` | FastAPI worker, Celery tasks, AI/billing/auth services |
-| Node.js | `20.x` LTS | Next.js Creator Studio & Remotion workspace |
+| Node.js | `22.x` LTS | Next.js `16.4.6` Creator Studio & Remotion `4.0.545` workspace |
 | npm | `10.x` | Monorepo workspace installation (`packages/*`, `apps/*`) |
 | FFmpeg & FFprobe | `6.0+` | Video/audio compositing and MP4 stream validation (`PATH` must expose `ffmpeg` and `ffprobe`) |
 | PostgreSQL (Prod/Staging) | `15+` | Recommended multi-tenant database (SQLite `local_dev.db` works for local dev/tests only) |
@@ -89,11 +89,14 @@ Minimum additions for **live AI & Stripe testing locally**:
 
 ## 4. Database Initialization & Migrations
 
-- **Local SQLite / Dev:** Starting the FastAPI worker automatically executes `init_db()` and `run_migrations()`, cleanly upgrading any legacy tables non-destructively.
+- **Local SQLite / Dev:** Starting the FastAPI worker automatically executes `init_db()` and `run_migrations()`, cleanly upgrading any legacy tables non-destructively (through migration `005`).
 - **PostgreSQL / Supabase:** Apply the SQL migrations in order before starting production instances:
   1. `services/worker/migrations/001_initial_schema.sql`
   2. `services/worker/migrations/002_saas_multi_tenant_auth_billing.sql`
-  (Or inspect `schema.sql` for the complete consolidated schema + RLS policies.)
+  3. `services/worker/migrations/003_google_oauth_identity.sql`
+  4. `services/worker/migrations/004_job_leases_and_immutability.sql`
+  5. `services/worker/migrations/005_transactional_outbox_and_rls_hardening.sql`
+  (Or inspect `schema.sql` for the complete consolidated schema + `FORCE ROW LEVEL SECURITY` policies.)
 
 ---
 

@@ -20,11 +20,14 @@ When `APP_ENV=production`, `services/worker/app/config.py` (`validate_production
 
 ## 2. Database & Migrations (PostgreSQL / Supabase)
 
-1. Provision PostgreSQL 15+ (e.g., Supabase Postgres, AWS RDS, Cloud SQL).
-2. Enable `pgcrypto` and apply:
+1. Provision PostgreSQL 15+ (PostgreSQL 16 recommended, e.g., Supabase Postgres, AWS RDS, Cloud SQL).
+2. Enable `pgcrypto` and apply all five migrations in order:
    - `services/worker/migrations/001_initial_schema.sql`
    - `services/worker/migrations/002_saas_multi_tenant_auth_billing.sql`
-3. Verify RLS policies are enabled if exposing Supabase REST/PostgREST directly alongside the FastAPI API.
+   - `services/worker/migrations/003_google_oauth_identity.sql`
+   - `services/worker/migrations/004_job_leases_and_immutability.sql`
+   - `services/worker/migrations/005_transactional_outbox_and_rls_hardening.sql`
+3. Verify RLS (`ENABLE` + `FORCE ROW LEVEL SECURITY`) policies are active if exposing Supabase REST/PostgREST alongside the FastAPI API, using a `NOBYPASSRLS` application role for RLS queries.
 4. Configure connection pooling (PgBouncer / Supabase Transaction Pooler) and scheduled automated backups.
 
 ---
@@ -65,9 +68,9 @@ When `APP_ENV=production`, `services/worker/app/config.py` (`validate_production
   - Run behind a reverse proxy with HTTPS termination, `TRUST_PROXY_HEADERS=true` and `X-Forwarded-For` trusted cleanly, and Uvicorn/Gunicorn workers:
     `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2`
 - **Celery Background Workers**:
-  - Set `CELERY_ALWAYS_EAGER=false` and `REDIS_URL=redis://...` (or `rediss://...`).
-  - Run `celery -A app.tasks.celery_app worker --concurrency=2 --loglevel=info` with FFmpeg + FFprobe installed in the container image and Google Fonts / Noto Nastaliq / Noto Sans Arabic / Noto Sans Devanagari fonts present for any drawtext fallback rendering.
-  - On worker boot, `recover_interrupted_jobs()` marks stale in-progress jobs as `FAILED` and atomically refunds reserved credits.
+  - Set `CELERY_ALWAYS_EAGER=false`, `REQUIRE_REDIS_BROKER=true`, and `REDIS_URL=redis://...` (or `rediss://...`).
+  - Run `celery -A app.tasks.celery_app worker --concurrency=2 --prefetch-multiplier=1 --max-tasks-per-child=50 --loglevel=info` with FFmpeg + FFprobe installed in the container image and Google Fonts / Noto Nastaliq / Noto Sans Arabic / Noto Sans Devanagari fonts present for any drawtext fallback rendering.
+  - Schedule a periodic reconciliation sweep invoking `recover_interrupted_jobs(min_age_seconds=120)` every 60s (recovers only expired active-worker leases without failing queued jobs, and relays any pending `job_dispatch_outbox` rows).
 
 ---
 

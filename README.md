@@ -13,11 +13,13 @@ A multi-tenant commercial SaaS platform for generating localized vertical (`9:16
   - **AI Pipeline (`app/scraper.py`, `app/veo.py`, `app/tts.py`, `app/compositor.py`, `app/storage.py`)**: SSRF-protected live storefront scraper returning explicit `verified_fields` and `missing_fields` (zero fabricated prices/claims), Vertex AI Veo 3.1 (`veo-3.1-generate-001`) long-running generation + GCS artifact download, Google Cloud Text-to-Speech synthesis, FFmpeg caption burn-in & audio muxing, FFmpeg stream/duration validation before settling credits, private workspace file storage, and HMAC-signed download URLs.
   - **Fail-Closed Production Guardrails (`app/config.py`)**: `validate_production_config()` aborts startup in `production` if `MOCK_VERTEX_VEO=true`, `MOCK_TTS=true`, SQLite `DATABASE_URL`, wildcard CORS, or weak/missing secrets are detected.
 
-- **`packages/remotion`** (`@video-ad/remotion`) — TypeScript + Remotion
-  - Parameterized ad composition supporting RTL (`Noto Nastaliq Urdu` at `1.85` line-height for `ur`, `Noto Sans Arabic` for `ar`) and LTR (`Noto Sans Devanagari` for `hi`, `Inter` for `en`), synchronized caption timelines, product image conditioning, and tabular price overlays.
+- **`packages/remotion`** (`@video-ad/remotion`) — TypeScript + Remotion `4.0.545` + React `19.3.1`
+  - Parameterized ad composition supporting RTL (`Noto Nastaliq Urdu` at `1.85`–`1.9` line-height for `ur`, `Noto Sans Arabic` for `ar`) and LTR (`Noto Sans Devanagari` for `hi`, `Inter` for `en`), synchronized caption timelines, product image conditioning, and tabular price overlays.
 
-- **`apps/studio`** (`@video-ad/studio`) — Next.js `14.2.35` + Tailwind CSS v4 + `@remotion/player`
-  - Dark-mode creator studio (`#09090B` canvas, `#18181B` surface, `#27272A` borders, `#6366F1` Indigo accent) acting as an authenticated BFF proxy to the FastAPI worker with HttpOnly cookie & Bearer forwarding, workspace switcher, product asset uploader, honest unverified-field confirmation gate, Stripe Checkout redirect flow, and job cancel/retry/signed-link controls.
+- **`apps/studio`** (`@video-ad/studio`) — Next.js `16.4.6` + React `19.3.1` + Tailwind CSS `4.3.5` + `@remotion/player` `4.0.545`
+  - Creamy-white & botanical-green creator studio (`#FAF7F2` canvas, `#FFFFFF` cards, `#E6E0D5` borders, `#15803D` green pill CTAs, WCAG 2.2 AA) acting as an authenticated BFF proxy to the FastAPI worker with `HttpOnly` cookie & Bearer forwarding, `X-Request-ID` header correlation, workspace switcher, product asset uploader, honest unverified-field confirmation gate, Stripe Checkout redirect flow, and job cancel/retry/signed-link controls.
+
+- **Durable Queueing & Safe Recovery (`services/worker/app/tasks.py`, `db.py`, `migrations/005_*`)**: Transactional dispatch outbox (`job_dispatch_outbox`), DB-clock (`clock_timestamp()` / `strftime`) monotonic `fencing_token` worker leases, queued-job-safe `recover_expired_leases()` + `reconcile_dispatch_outbox()`, and `FORCE ROW LEVEL SECURITY` multi-tenant isolation.
 
 ---
 

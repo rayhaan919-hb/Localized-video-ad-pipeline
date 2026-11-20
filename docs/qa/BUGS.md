@@ -72,7 +72,7 @@ Expected vs actual:
 Expected: AuthModal syncs mode to initialMode on open (opening Verify Email), passes devVerifyToken into StudioWorkspace banner, supports Escape key close, and CreditCheckoutModal ledger wraps with overflow-x-auto cleanly inside 375px viewport.
 Actual: AuthModal retained internal React mode state ('register'), discarded verify_email_token, had no Escape handler, and ledger table wrapper lacked overflow-x-auto.
 Evidence: apps/studio/src/components/AuthModal.tsx, StudioWorkspace.tsx, CreditCheckoutModal.tsx; fixed & verified via live browser walkthrough on http://127.0.0.1:3000 at 1280x800 and 375x812 (table 540.85px scrolled inside 263.2px container, dialog 360px).
-Environment: branch main, Next.js 14.2.35 production build, Chromium browser subagent
+Environment: branch main (historical v2.0.0 baseline at `33a9948` upgraded to Next.js 16.4.6 / React 19.3.1 in subsequent release)
 Status: verified
 ```
 
@@ -113,7 +113,7 @@ Expected vs actual:
 Expected: Concurrent 401 responses share a single serialized POST /api/v1/auth/refresh call (avoiding refresh replay revocation) before retrying; generate sends confirmedMetadata so worker skips redundant fallback scrape.
 Actual: Any 401 logged user out immediately; worker re-scraped product_url unnecessarily.
 Evidence: apps/studio/src/components/StudioWorkspace.tsx, types/studio.ts, apps/studio/src/app/api/v1/videos/generate/route.ts; verified by apps/studio/src/__tests__/studio.test.ts.
-Environment: branch main, Next.js 14.2.35
+Environment: branch main (historical v2.0.0 baseline upgraded to Next.js 16.4.6 / React 19.3.1 in subsequent release)
 Status: verified
 ```
 

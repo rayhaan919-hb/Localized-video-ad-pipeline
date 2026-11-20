@@ -9,7 +9,7 @@
 
 ## 1. Initial Audit Findings
 
-Before modifying code, the full repository (`services/worker`, `apps/studio`, `packages/remotion`, `schema.sql`, `migrations/`, `.github/workflows/ci.yml`) was revalidated against the live source code in [AUDIT/PRODUCTION_HARDENING_AUDIT.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/AUDIT/PRODUCTION_HARDENING_AUDIT.md):
+Before modifying code, the full repository (`services/worker`, `apps/studio`, `packages/remotion`, `schema.sql`, `migrations/`, `.github/workflows/ci.yml`) was revalidated against the live source code in [AUDIT/PRODUCTION_HARDENING_AUDIT.md](PRODUCTION_HARDENING_AUDIT.md):
 
 - **`P0-001` (Critical):** Silent Celery fallback to `memory://` broker and `task_always_eager=True` when Redis was unreachable; `validate_production_config()` did not block eager mode or require live Redis; `process_video_job` lacked task timeouts, `acks_late`, prefetch limits, and jittered exponential retries.
 - **`P0-002` (Critical):** Age-only `recover_interrupted_jobs(min_age_seconds)` relied purely on `VideoJob.updated_at`, risked aborting legitimate long-running Veo renders, and lacked `worker_id`, renewable leases, heartbeats, and monotonic `fencing_token` checks on state transitions.
@@ -26,7 +26,7 @@ Before modifying code, the full repository (`services/worker`, `apps/studio`, `p
 
 All **10 issues** (`P0-001`..`P0-003`, `P1-001`..`P1-004`, `P2-001`..`P2-003`) were independently confirmed directly in the baseline code. In addition, executing Phase 12 concurrent render benchmarks surfaced **one newly uncovered runtime race**:
 
-- **Concurrent Mock Veo Fixture Write Race ([veo.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/veo.py)):** Under 4-thread parallel E2E rendering, `ensure_sample_fixture()` wrote directly to the shared target MP4 path without locking or atomic swap, causing `1/6` concurrent renders in the initial benchmark run to hit `StorageError`/`VideoValidationError` against a partially written fixture. Resolved with `_FIXTURE_LOCK` (`threading.Lock`) and staging-file `os.replace()`.
+- **Concurrent Mock Veo Fixture Write Race ([veo.py](../services/worker/app/veo.py)):** Under 4-thread parallel E2E rendering, `ensure_sample_fixture()` wrote directly to the shared target MP4 path without locking or atomic swap, causing `1/6` concurrent renders in the initial benchmark run to hit `StorageError`/`VideoValidationError` against a partially written fixture. Resolved with `_FIXTURE_LOCK` (`threading.Lock`) and staging-file `os.replace()`.
 
 ---
 
@@ -34,55 +34,55 @@ All **10 issues** (`P0-001`..`P0-003`, `P1-001`..`P1-004`, `P2-001`..`P2-003`) w
 
 | Audit ID | Implemented Solution | Primary Files |
 | :--- | :--- | :--- |
-| `P0-001` | Fail-closed `validate_production_config()`, `configure_celery_app()`, and `dispatch_video_job()` rejecting `CELERY_ALWAYS_EAGER=true` / `memory://` / unreachable Redis in prod (refunding credit + returning `HTTP 503`); soft/hard time limits (`300s`/`360s`), `acks_late=True`, `worker_prefetch_multiplier=1`, `TransientJobError` vs `PermanentJobError`, and `compute_retry_countdown()` exponential backoff + jitter. | [config.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/config.py), [tasks.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/tasks.py), [main.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/main.py) |
-| `P0-002` | Exclusive worker ownership (`worker_id`), renewable leases (`lease_expires_at`), `_LeaseHeartbeatThread`, monotonic `fencing_token` barriers (`StaleWorkerLeaseError`), duplicate delivery guards, and lease-aware `recover_interrupted_jobs()` guaranteeing single idempotent refunds. | [tasks.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/tasks.py), [db.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/db.py), [004_job_leases_and_immutability.sql](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/migrations/004_job_leases_and_immutability.sql) |
-| `P0-003` | Connection-time SSRF prevention via `SSRFSafeNetworkBackend(httpcore.SyncBackend)` pinning validated global IPs into `connect_tcp` (eliminating DNS rebinding TOCTOU), rejecting CGNAT/private/loopback/link-local/metadata/IPv6-mapped/6to4/Teredo/obfuscated IPs & dangerous ports, per-hop redirect validation, `Accept-Encoding: identity` + byte caps, `12s` wall-clock deadlines, and Content-Type checks. | [scraper.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/scraper.py) |
-| `P1-001` | `DistributedRateLimiter` using atomic Redis Lua sliding windows (`SharedRateLimitStore` test adapter + non-prod fallback), short-window burst protection, `429` + `Retry-After` + `X-RateLimit-*` headers, and 8 separate configurable rate limits (`auth_login`, `auth_register`, `auth_password_reset`, `video_generate`, `video_render_retry`, `product_scrape`, `file_download`, `billing_checkout`). | [security.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/security.py), [config.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/config.py), [main.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/main.py) |
-| `P1-002` | Automatic reconciliation of prior `refund_without_matching_purchase` records when `checkout.session.completed` / `async_payment_succeeded` settles; ORM `before_delete`/`before_update` + SQL `trg_credit_ledger_no_delete` immutability enforcement; `ON DELETE RESTRICT` on `credit_ledger.workspace_id`; `reconcile_workspace_credits()` + `GET /v1/workspaces/{id}/credits/reconcile`. | [billing.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/billing.py), [db.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/db.py), [schema.sql](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/schema.sql) |
-| `P1-003` | PostgreSQL pool settings (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, `DB_POOL_RECYCLE`) and `FORCE ROW LEVEL SECURITY` on all 9 PostgreSQL tables. | [db.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/db.py), [schema.sql](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/schema.sql), [004_job_leases_and_immutability.sql](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/migrations/004_job_leases_and_immutability.sql) |
-| `P1-004` | Locked-account JWT rejection (`403`) in `get_current_user()`, `POST /v1/auth/logout-all` + Studio BFF allowlist update, and `DELETE /v1/workspaces/{id}/members/{member_user_id}` with hierarchy guards. | [auth.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/auth.py), [main.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/main.py), [route.ts](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/apps/studio/src/app/api/v1/auth/[...path]/route.ts) |
-| `P2-001`–`003` | Hardened CI (`permissions: contents: read`, `pip-audit --strict --desc`, migration smoke test, `npm audit --omit=dev --audit-level=high`, secret regex check), `VideoJob.correlation_id`, `MetricsRegistry`, enriched `/health`, `GET /v1/ops/metrics`, `scripts/run_benchmarks.py`, atomic `ensure_sample_fixture()`, and 11 operational docs. | [.github/workflows/ci.yml](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/.github/workflows/ci.yml), [veo.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/veo.py), root ops docs |
+| `P0-001` | Fail-closed `validate_production_config()`, `configure_celery_app()`, and `dispatch_video_job()` rejecting `CELERY_ALWAYS_EAGER=true` / `memory://` / unreachable Redis in prod (refunding credit + returning `HTTP 503`); soft/hard time limits (`300s`/`360s`), `acks_late=True`, `worker_prefetch_multiplier=1`, `TransientJobError` vs `PermanentJobError`, and `compute_retry_countdown()` exponential backoff + jitter. | [config.py](../services/worker/app/config.py), [tasks.py](../services/worker/app/tasks.py), [main.py](../services/worker/app/main.py) |
+| `P0-002` | Exclusive worker ownership (`worker_id`), renewable leases (`lease_expires_at`), `_LeaseHeartbeatThread`, monotonic `fencing_token` barriers (`StaleWorkerLeaseError`), duplicate delivery guards, and lease-aware `recover_interrupted_jobs()` guaranteeing single idempotent refunds. | [tasks.py](../services/worker/app/tasks.py), [db.py](../services/worker/app/db.py), [004_job_leases_and_immutability.sql](../services/worker/migrations/004_job_leases_and_immutability.sql) |
+| `P0-003` | Connection-time SSRF prevention via `SSRFSafeNetworkBackend(httpcore.SyncBackend)` pinning validated global IPs into `connect_tcp` (eliminating DNS rebinding TOCTOU), rejecting CGNAT/private/loopback/link-local/metadata/IPv6-mapped/6to4/Teredo/obfuscated IPs & dangerous ports, per-hop redirect validation, `Accept-Encoding: identity` + byte caps, `12s` wall-clock deadlines, and Content-Type checks. | [scraper.py](../services/worker/app/scraper.py) |
+| `P1-001` | `DistributedRateLimiter` using atomic Redis Lua sliding windows (`SharedRateLimitStore` test adapter + non-prod fallback), short-window burst protection, `429` + `Retry-After` + `X-RateLimit-*` headers, and 8 separate configurable rate limits (`auth_login`, `auth_register`, `auth_password_reset`, `video_generate`, `video_render_retry`, `product_scrape`, `file_download`, `billing_checkout`). | [security.py](../services/worker/app/security.py), [config.py](../services/worker/app/config.py), [main.py](../services/worker/app/main.py) |
+| `P1-002` | Automatic reconciliation of prior `refund_without_matching_purchase` records when `checkout.session.completed` / `async_payment_succeeded` settles; ORM `before_delete`/`before_update` + SQL `trg_credit_ledger_no_delete` immutability enforcement; `ON DELETE RESTRICT` on `credit_ledger.workspace_id`; `reconcile_workspace_credits()` + `GET /v1/workspaces/{id}/credits/reconcile`. | [billing.py](../services/worker/app/billing.py), [db.py](../services/worker/app/db.py), [schema.sql](../schema.sql) |
+| `P1-003` | PostgreSQL pool settings (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, `DB_POOL_RECYCLE`) and `FORCE ROW LEVEL SECURITY` on all 9 PostgreSQL tables. | [db.py](../services/worker/app/db.py), [schema.sql](../schema.sql), [004_job_leases_and_immutability.sql](../services/worker/migrations/004_job_leases_and_immutability.sql) |
+| `P1-004` | Locked-account JWT rejection (`403`) in `get_current_user()`, `POST /v1/auth/logout-all` + Studio BFF allowlist update, and `DELETE /v1/workspaces/{id}/members/{member_user_id}` with hierarchy guards. | [auth.py](../services/worker/app/auth.py), [main.py](../services/worker/app/main.py), [route.ts](../apps/studio/src/app/api/v1/auth/[...path]/route.ts) |
+| `P2-001`–`003` | Hardened CI (`permissions: contents: read`, `pip-audit --strict --desc`, migration smoke test, `npm audit --omit=dev --audit-level=high`, secret regex check), `VideoJob.correlation_id`, `MetricsRegistry`, enriched `/health`, `GET /v1/ops/metrics`, `scripts/run_benchmarks.py`, atomic `ensure_sample_fixture()`, and 11 operational docs. | [.github/workflows/ci.yml](../.github/workflows/ci.yml), [veo.py](../services/worker/app/veo.py), root ops docs |
 
 ---
 
 ## 4. Files Changed
 
 ### Modified Existing Files (`19`)
-- [.env.example](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/.env.example)
-- [.github/workflows/ci.yml](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/.github/workflows/ci.yml)
-- [CHANGELOG.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/CHANGELOG.md)
-- [SECURITY.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/SECURITY.md)
-- [apps/studio/src/__tests__/studio.test.ts](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/apps/studio/src/__tests__/studio.test.ts)
-- [apps/studio/src/app/api/v1/auth/[...path]/route.ts](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/apps/studio/src/app/api/v1/auth/[...path]/route.ts)
-- [docs/STATUS.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/docs/STATUS.md)
-- [schema.sql](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/schema.sql)
-- [services/worker/app/auth.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/auth.py)
-- [services/worker/app/billing.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/billing.py)
-- [services/worker/app/config.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/config.py)
-- [services/worker/app/db.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/db.py)
-- [services/worker/app/main.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/main.py)
-- [services/worker/app/migrations.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/migrations.py)
-- [services/worker/app/scraper.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/scraper.py)
-- [services/worker/app/security.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/security.py)
-- [services/worker/app/tasks.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/tasks.py)
-- [services/worker/app/veo.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/veo.py)
-- [services/worker/pyproject.toml](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/pyproject.toml)
+- [.env.example](../.env.example)
+- [.github/workflows/ci.yml](../.github/workflows/ci.yml)
+- [CHANGELOG.md](../CHANGELOG.md)
+- [SECURITY.md](../SECURITY.md)
+- [apps/studio/src/__tests__/studio.test.ts](../apps/studio/src/__tests__/studio.test.ts)
+- [apps/studio/src/app/api/v1/auth/[...path]/route.ts](../apps/studio/src/app/api/v1/auth/[...path]/route.ts)
+- [docs/STATUS.md](../docs/STATUS.md)
+- [schema.sql](../schema.sql)
+- [services/worker/app/auth.py](../services/worker/app/auth.py)
+- [services/worker/app/billing.py](../services/worker/app/billing.py)
+- [services/worker/app/config.py](../services/worker/app/config.py)
+- [services/worker/app/db.py](../services/worker/app/db.py)
+- [services/worker/app/main.py](../services/worker/app/main.py)
+- [services/worker/app/migrations.py](../services/worker/app/migrations.py)
+- [services/worker/app/scraper.py](../services/worker/app/scraper.py)
+- [services/worker/app/security.py](../services/worker/app/security.py)
+- [services/worker/app/tasks.py](../services/worker/app/tasks.py)
+- [services/worker/app/veo.py](../services/worker/app/veo.py)
+- [services/worker/pyproject.toml](../services/worker/pyproject.toml)
 
 ### Newly Created Files (`14`)
-- [services/worker/migrations/004_job_leases_and_immutability.sql](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/migrations/004_job_leases_and_immutability.sql)
-- [services/worker/tests/test_hardening_phases.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/tests/test_hardening_phases.py)
-- [services/worker/scripts/run_benchmarks.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/scripts/run_benchmarks.py)
-- [AUDIT/PRODUCTION_HARDENING_AUDIT.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/AUDIT/PRODUCTION_HARDENING_AUDIT.md)
-- [AUDIT/FINAL_PRODUCTION_READINESS_REPORT.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/AUDIT/FINAL_PRODUCTION_READINESS_REPORT.md)
-- [PRODUCTION_READINESS.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/PRODUCTION_READINESS.md)
-- [DEPLOYMENT_GUIDE.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/DEPLOYMENT_GUIDE.md)
-- [ENVIRONMENT_VARIABLES.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/ENVIRONMENT_VARIABLES.md)
-- [DATABASE_MIGRATIONS.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/DATABASE_MIGRATIONS.md)
-- [BACKGROUND_JOBS.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/BACKGROUND_JOBS.md)
-- [INCIDENT_RESPONSE.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/INCIDENT_RESPONSE.md)
-- [BACKUP_AND_RECOVERY.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/BACKUP_AND_RECOVERY.md)
-- [MONITORING.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/MONITORING.md)
-- [TESTING_GUIDE.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/TESTING_GUIDE.md)
+- [services/worker/migrations/004_job_leases_and_immutability.sql](../services/worker/migrations/004_job_leases_and_immutability.sql)
+- [services/worker/tests/test_hardening_phases.py](../services/worker/tests/test_hardening_phases.py)
+- [services/worker/scripts/run_benchmarks.py](../services/worker/scripts/run_benchmarks.py)
+- [AUDIT/PRODUCTION_HARDENING_AUDIT.md](PRODUCTION_HARDENING_AUDIT.md)
+- [AUDIT/FINAL_PRODUCTION_READINESS_REPORT.md](FINAL_PRODUCTION_READINESS_REPORT.md)
+- [PRODUCTION_READINESS.md](../PRODUCTION_READINESS.md)
+- [DEPLOYMENT_GUIDE.md](../DEPLOYMENT_GUIDE.md)
+- [ENVIRONMENT_VARIABLES.md](../ENVIRONMENT_VARIABLES.md)
+- [DATABASE_MIGRATIONS.md](../DATABASE_MIGRATIONS.md)
+- [BACKGROUND_JOBS.md](../BACKGROUND_JOBS.md)
+- [INCIDENT_RESPONSE.md](../INCIDENT_RESPONSE.md)
+- [BACKUP_AND_RECOVERY.md](../BACKUP_AND_RECOVERY.md)
+- [MONITORING.md](../MONITORING.md)
+- [TESTING_GUIDE.md](../TESTING_GUIDE.md)
 
 *(Pre-existing untracked `docs_pdf/` directory in workspace left untouched.)*
 
@@ -90,13 +90,13 @@ All **10 issues** (`P0-001`..`P0-003`, `P1-001`..`P1-004`, `P2-001`..`P2-003`) w
 
 ## 5. Database Migrations Created
 
-- **[services/worker/migrations/004_job_leases_and_immutability.sql](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/migrations/004_job_leases_and_immutability.sql):**
+- **[services/worker/migrations/004_job_leases_and_immutability.sql](../services/worker/migrations/004_job_leases_and_immutability.sql):**
   - Adds `worker_id`, `lease_expires_at`, `heartbeat_at`, `fencing_token` (`NOT NULL DEFAULT 0`), and `correlation_id` to `video_jobs`.
   - Adds composite/lookup indexes `idx_video_jobs_status_lease (status, lease_expires_at)` and `idx_video_jobs_correlation_id (correlation_id)`.
   - Creates PostgreSQL trigger function `public.prevent_credit_ledger_delete()` and `BEFORE DELETE` trigger `trg_credit_ledger_no_delete` on `credit_ledger`.
   - Enables `FORCE ROW LEVEL SECURITY` on all 9 tables (`schema_migrations`, `users`, `auth_sessions`, `stripe_events`, `workspaces`, `workspace_members`, `workspace_assets`, `video_jobs`, `credit_ledger`).
   - Records `004_job_leases_and_immutability` idempotently in `schema_migrations`.
-- **[services/worker/app/migrations.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/app/migrations.py) & [schema.sql](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/schema.sql):** Updated to mirror all columns, indexes, SQLite/PostgreSQL triggers, and `ON DELETE RESTRICT` on `credit_ledger.workspace_id`.
+- **[services/worker/app/migrations.py](../services/worker/app/migrations.py) & [schema.sql](../schema.sql):** Updated to mirror all columns, indexes, SQLite/PostgreSQL triggers, and `ON DELETE RESTRICT` on `credit_ledger.workspace_id`.
 
 ---
 
@@ -143,7 +143,7 @@ All commands below were executed locally after the final code edit:
 | Studio Verify (`npm run verify:studio`) | **PASS** | Exit code `0` (`tsc --noEmit`, `eslint --max-warnings 0`, **`9/9` Studio tests passed**, clean Next.js `16.4.6` production build) |
 | Production NPM Audit (`npm audit --omit=dev`) | **PASS** | `found 0 vulnerabilities` |
 | Phase 12 Concurrent Benchmark (`run_benchmarks.py`) | **PASS** | Exit code `0`; `0.0%` error rate across all 4 concurrent scenarios (`86` total ops); `is_balanced: true` |
-| Post-Hardening Live Browser Regression (Stage 9) | **PASS** | Host-verified visited origin `http://127.0.0.1:3000` (`blocked_origins: none`, screenshot [final_step_24.png](file:///C:/Users/Admin/.gemini/antigravity/brain/6bdf0220-fc07-4c6c-bf42-0f82d98370a3/browser_evidence/d44ebbf4-c871-4242-9959-ca1a2f83cdaa/final_step_24.png)). Verified `0` console/page/CSP errors, `0` HTTP `>= 500` responses, Google OAuth buttons visible, registration (`HTTP 201`) -> email verification (`HTTP 200` with `HttpOnly` cookies & stripped tokens), `3 Credits -> 2 Credits`, visible `#custom-prompt-input`, `POST /api/v1/videos/generate` (`HTTP 202` -> `COMPLETED`, `540x960`), streamed `/api/v1/renders/[jobId]` (`HTTP 200`, `video/mp4`, `77,557` bytes), and billing ledger (`3` rows). Temporary QA servers stopped cleanly. *(Note: Studio BFF `forwardWorkerJsonResponse()` / render proxy omit echoing `X-Request-ID` back to browser responses.)* |
+| Post-Hardening Live Browser Regression (Stage 9) | **PASS** | Host-verified visited origin `http://127.0.0.1:3000` (`blocked_origins: none`, screenshot `final_step_24.png` (external QA artifact)). Verified `0` console/page/CSP errors, `0` HTTP `>= 500` responses, Google OAuth buttons visible, registration (`HTTP 201`) -> email verification (`HTTP 200` with `HttpOnly` cookies & stripped tokens), `3 Credits -> 2 Credits`, visible `#custom-prompt-input`, `POST /api/v1/videos/generate` (`HTTP 202` -> `COMPLETED`, `540x960`), streamed `/api/v1/renders/[jobId]` (`HTTP 200`, `video/mp4`, `77,557` bytes), and billing ledger (`3` rows). Temporary QA servers stopped cleanly. *(Note: Studio BFF `forwardWorkerJsonResponse()` / render proxy omit echoing `X-Request-ID` back to browser responses.)* |
 
 ---
 
@@ -169,7 +169,7 @@ The following checks require buyer staging credentials and cannot run live from 
 
 ## 12. Performance Benchmark Results
 
-Executed via [services/worker/scripts/run_benchmarks.py](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/services/worker/scripts/run_benchmarks.py) against SQLite + local FFmpeg (`mock_veo=true`, `mock_tts=true`, `tracemalloc` active):
+Executed via [services/worker/scripts/run_benchmarks.py](../services/worker/scripts/run_benchmarks.py) against SQLite + local FFmpeg (`mock_veo=true`, `mock_tts=true`, `tracemalloc` active):
 
 | Scenario | Concurrency | Requests | Errors | Wall Time | Throughput | Avg (ms) | p50 (ms) | p95 (ms) | p99 (ms) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -185,7 +185,7 @@ Executed via [services/worker/scripts/run_benchmarks.py](file:///C:/Users/Admin/
 
 ## 13. Deployment Instructions
 
-Full instructions live in [DEPLOYMENT_GUIDE.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/DEPLOYMENT_GUIDE.md), [ENVIRONMENT_VARIABLES.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/ENVIRONMENT_VARIABLES.md), and [DATABASE_MIGRATIONS.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/DATABASE_MIGRATIONS.md):
+Full instructions live in [DEPLOYMENT_GUIDE.md](../DEPLOYMENT_GUIDE.md), [ENVIRONMENT_VARIABLES.md](../ENVIRONMENT_VARIABLES.md), and [DATABASE_MIGRATIONS.md](../DATABASE_MIGRATIONS.md):
 
 1. Provision PostgreSQL 15+ (with PITR enabled), persistent Redis 7+, and persistent storage (`STORAGE_ROOT` / `GCS_BUCKET`).
 2. Populate all required production environment variables (`APP_ENV=production`, `CELERY_ALWAYS_EAGER=false`, `REDIS_URL`, `DATABASE_URL`, `WORKER_API_KEY`, `AUTH_JWT_SECRET`, `SIGNED_URL_SECRET`, explicit `CORS_ORIGINS`, GCP & Stripe keys).
@@ -197,7 +197,7 @@ Full instructions live in [DEPLOYMENT_GUIDE.md](file:///C:/Users/Admin/.gemini/a
 
 ## 14. Rollback Instructions
 
-Full recovery steps live in [DEPLOYMENT_GUIDE.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/DEPLOYMENT_GUIDE.md), [INCIDENT_RESPONSE.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/INCIDENT_RESPONSE.md), and [BACKUP_AND_RECOVERY.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/BACKUP_AND_RECOVERY.md):
+Full recovery steps live in [DEPLOYMENT_GUIDE.md](../DEPLOYMENT_GUIDE.md), [INCIDENT_RESPONSE.md](../INCIDENT_RESPONSE.md), and [BACKUP_AND_RECOVERY.md](../BACKUP_AND_RECOVERY.md):
 
 1. **Application Rollback:** Shift load balancer traffic back to the prior container revisions of API, Celery workers, and Studio. Migrations `002`–`004` are strictly additive (`ADD COLUMN IF NOT EXISTS`, additive indexes/triggers), so the previous minor app release remains compatible.
 2. **In-Flight Job & Credit Recovery:** Run `recover_interrupted_jobs(min_age_seconds=0)` once workers settle to release stale leases and issue single idempotent refunds.
@@ -209,7 +209,7 @@ Full recovery steps live in [DEPLOYMENT_GUIDE.md](file:///C:/Users/Admin/.gemini
 
 ### Verdict: **Conditional Go — Ready for Staging Sign-Off (Codebase Hardened & Locally Verified)**
 
-The core application, background processing architecture, lease recovery, distributed rate limiting, connection-time SSRF protection, billing ledger reconciliation, database RLS schema, post-hardening live Studio browser E2E flow, and CI/CD pipeline now satisfy enterprise SaaS engineering standards locally. Final commercial production cutover is gated strictly on executing the staging cloud verification checklist ([PRODUCTION_READINESS.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/PRODUCTION_READINESS.md)) with live buyer credentials.
+The core application, background processing architecture, lease recovery, distributed rate limiting, connection-time SSRF protection, billing ledger reconciliation, database RLS schema, post-hardening live Studio browser E2E flow, and CI/CD pipeline now satisfy enterprise SaaS engineering standards locally. Final commercial production cutover is gated strictly on executing the staging cloud verification checklist ([PRODUCTION_READINESS.md](../PRODUCTION_READINESS.md)) with live buyer credentials.
 
 | Dimension | Score | Evidence & Rationale (Deductions Explicitly Justified) |
 | :--- | :---: | :--- |

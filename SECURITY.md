@@ -22,7 +22,7 @@ This document details the security controls enforced across **Localized AI Video
 
 - **Zero Default Shared Tenant**: Removed `DEFAULT_WORKSPACE_ID` (`00000000-0000-0000-0000-000000000001`), `DEFAULT_OWNER_ID`, and all automatic shared workspace seeding across both `services/worker` and `apps/studio`.
 - **Membership Enforcement**: Every protected workspace, job, billing, asset, and download endpoint invokes `require_workspace_role(db, workspace_id=..., user=current_user, minimum_role=...)`. `DELETE /v1/workspaces/{id}/members/{uid}` forbids removing workspace owners or allowing non-owners to remove admins.
-- **Database Row-Level Security (RLS)**: [schema.sql](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/schema.sql) and migrations `002` + `004` enable and `FORCE ROW LEVEL SECURITY` across `schema_migrations`, `users`, `auth_sessions`, `stripe_events`, `workspaces`, `workspace_members`, `workspace_assets`, `video_jobs`, and `credit_ledger`.
+- **Database Row-Level Security (RLS)**: [`schema.sql`](./schema.sql) and migrations `002`, `004`, and `005` enable and `FORCE ROW LEVEL SECURITY` across `schema_migrations`, `users`, `auth_sessions`, `stripe_events`, `workspaces`, `workspace_members`, `workspace_assets`, `video_jobs`, `credit_ledger`, and `job_dispatch_outbox`, with explicit `TO authenticated` policies (and default-deny on internal/system tables).
 
 ---
 

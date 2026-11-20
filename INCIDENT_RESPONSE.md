@@ -42,4 +42,4 @@
 ### 5. Emergency Rollback Procedure
 1. Stop incoming traffic / place load balancer in maintenance mode if a bad schema or app deploy causes `5xx` spikes.
 2. Redeploy the previous known-good container tag (code rollback).
-3. Because schema migrations (`002`, `003`, `004`) strictly add nullable/defaulted columns and non-breaking indexes/triggers, the prior minor code version remains backward-compatible with added columns; restore DB snapshot only if data corruption occurred.
+3. Because schema migrations (`002`, `003`, `004`, `005`) strictly add nullable/defaulted columns, additive outbox tables, and non-breaking indexes/triggers, the prior minor code version remains backward-compatible with added columns; restore DB snapshot only if data corruption occurred.

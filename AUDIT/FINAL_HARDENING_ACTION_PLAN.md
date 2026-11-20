@@ -88,10 +88,10 @@ All 5 items identified for final commercial hardening were independently revalid
 - **Root Cause:**
   1. Legacy docs still reference `Next.js 14.2.35` (`README.md`), dark-mode `#09090B` styling (`README.md`, `DESIGN.md`), old test counts (`27/27`, `5/5` in `PRODUCTION_READINESS_REPORT.md`), Node `20.x` (`INSTALLATION.md`), and only migrations `001`–`002` (`INSTALLATION.md`, `DEPLOYMENT.md`).
   2. `API_DOCUMENTATION.md` lacks newer routes (`/v1/ops/metrics`, `/v1/auth/logout-all`, Google OAuth routes, `DELETE` workspace member, `/credits/reconcile`).
-  3. Seven markdown files contain developer-local `file:///C:/Users/Admin/...` links unusable by teammates on clean checkouts.
+  3. Seven markdown files contain developer-local Windows filesystem links unusable by teammates on clean checkouts.
 - **Proposed Fix:**
   - Synchronize all root, worker, and operational docs against verified package manifests (`next@^16.4.6`, `react@^19.3.1`, `remotion@4.0.545`, `tailwindcss@^4.3.5`, `node v22`), schema migrations (`001`–`005`), actual executed test results, and real UI/architecture.
-  - Replace every `file:///C:` link across all repo `.md` files with repository-relative markdown links (`./...`, `../...`), and verify zero broken relative links remain.
+  - Replace every local Windows filesystem link across all repo `.md` files with repository-relative markdown links (`./...`, `../...`), and verify zero broken relative links remain.
 
 ---
 

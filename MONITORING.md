@@ -28,8 +28,10 @@ Operator telemetry endpoint (requires `X-Admin-Secret` or authenticated platform
 - `db_latency_ms`: Live SQL round-trip timing.
 - `rate_limiter_backend`: `"redis"`, `"shared_store"`, or `"local_memory_fallback"`.
 - `queue`: `{ redis_broker, celery_eager_mode, require_redis_broker, queue_depth, active_workers }`.
-- `jobs`: `{ in_flight, active_leases, expired_leases, total_failed }`.
-- `telemetry`: HTTP status counters, rate-limit rejection counters, billing/job counters, and `p50`/`p95`/`p99`/`max` latency histograms for HTTP requests and per-stage AI timings (`stage.scrape`, `stage.tts`, `stage.veo`, `stage.ffmpeg`, `job.total`).
+- `jobs`: `{ in_flight, queued_jobs, active_execution_jobs, active_leases, expired_leases, total_failed }` (`queued_jobs` are monitored separately and never reclaimed by lease expiry).
+- `outbox`: `{ pending, publishing, failed }` dispatch outbox queue health from `job_dispatch_outbox`.
+- `db_clock`: DB-native server timestamp expression check (`clock_timestamp()` / SQLite `strftime`).
+- `telemetry`: HTTP status counters, rate-limit rejection counters, billing/job counters, and `p50`/`p95`/`p99`/`max` latency histograms for HTTP requests and per-stage AI timings (`stage.scrape`, `stage.tts`, `stage.veo`, `stage.ffmpeg`, `job.total`). Every response echoes `X-Request-ID` (both FastAPI and Next.js Studio BFF).
 
 ---
 

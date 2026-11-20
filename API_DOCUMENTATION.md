@@ -22,7 +22,7 @@ This document describes all backend **FastAPI Worker** (`/v1/*`) endpoints (`ser
 
 ---
 
-## 1. System Health
+## 1. System Health & Observability
 
 ### `GET /health`
 Returns service diagnostics without exposing secrets:
@@ -31,6 +31,10 @@ Returns service diagnostics without exposing secrets:
 - `ffmpeg_available`, `ffprobe_available`
 - `mock_vertex_veo`, `mock_tts`
 - `worker_api_key_required`, `stripe_configured`
+- `queue_health` (`redis_broker`, `celery_eager_mode`, `require_redis_broker`)
+
+### `GET /v1/ops/metrics` (`X-Admin-Secret` or platform admin JWT)
+Returns operational counters, stage latencies (`stage.*`), `rate_limiter.backend_mode`, `database` stats (`db_clock`), `queue_health` (with Celery ping inspection), `outbox` state counts, and recent job failure breakdown. Every response echoes `X-Request-ID`.
 
 ---
 
@@ -38,14 +42,18 @@ Returns service diagnostics without exposing secrets:
 
 | Method | Path | Auth Required | Description |
 |---|---|---|---|
-| `POST` | `/v1/auth/register` | Public (rate-limited) | Register user, create primary workspace, optionally grant server-configured promo credits (`INITIAL_PROMO_CREDITS`), issue JWT + refresh cookies. |
+| `GET` | `/v1/auth/providers` | Public | Advertise available auth modes (`password`, `google_oauth_enabled`, email verification flag). |
+| `POST` | `/v1/auth/register` | Public (rate-limited) | Register user, create primary workspace, optionally grant server-configured promo credits (`INITIAL_PROMO_CREDITS`), issue verification token & JWT + refresh cookies. |
 | `POST` | `/v1/auth/login` | Public (rate-limited + lockout) | Authenticate email/password, issue JWT + refresh cookies. Locks after `AUTH_LOCKOUT_MAX_ATTEMPTS`. |
 | `POST` | `/v1/auth/refresh` | Refresh Token | Rotate refresh session token and detect replay reuse. |
 | `POST` | `/v1/auth/logout` | Optional | Revoke refresh session and clear auth cookies. |
+| `POST` | `/v1/auth/logout-all` | JWT | Revoke all active refresh sessions across every device for caller. |
 | `GET` | `/v1/auth/me` | JWT | Return authenticated user profile and list of authorized workspaces with roles & balances. |
 | `POST` | `/v1/auth/verify-email` | Token | Verify user email using issued verification token. |
 | `POST` | `/v1/auth/password-reset/request` | Public (rate-limited) | Issue single-use time-limited password reset token hash. |
 | `POST` | `/v1/auth/password-reset/confirm` | Token | Set new password and revoke all active refresh sessions. |
+| `GET` | `/v1/auth/google/start` | Public | Initiate Google OAuth 2.0 Authorization Code + PKCE (`S256`) flow with HMAC-signed state cookie. |
+| `POST` | `/v1/auth/google/callback` | Public | Exchange authorization code + PKCE verifier, link/provision verified Google user, issue session cookies. |
 
 ---
 
@@ -57,7 +65,9 @@ Returns service diagnostics without exposing secrets:
 | `POST` | `/v1/workspaces` | User | Create a new workspace owned by the caller (starts with `0` credits; never auto-grants promotional credits). |
 | `GET` | `/v1/workspaces/{workspace_id}` | `member` | Return workspace balances, member roster, and last 50 immutable `credit_ledger` entries. |
 | `POST` | `/v1/workspaces/{workspace_id}/members` | `admin` (`owner` to grant `admin`) | Invite/add an existing registered user to workspace with role `member` or `admin`. |
-| `PATCH` | `/v1/workspaces/{workspace_id}/members/{user_id}` | `owner` | Change an existing member's role. |
+| `PATCH` | `/v1/workspaces/{workspace_id}/members/{member_user_id}` | `owner` | Change an existing member's role. |
+| `DELETE` | `/v1/workspaces/{workspace_id}/members/{member_user_id}` | `admin` (`owner` for admin removal) | Remove a member from workspace while protecting workspace owners and enforcing RBAC hierarchy. |
+| `GET` | `/v1/workspaces/{workspace_id}/credits/reconcile` | `member` | Verify workspace balance/reserved totals against immutable `credit_ledger` entries (`is_balanced`). |
 
 ---
 

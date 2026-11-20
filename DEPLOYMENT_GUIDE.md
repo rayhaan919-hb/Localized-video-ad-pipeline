@@ -32,7 +32,7 @@ Every production startup runs `validate_production_config()`. Startup aborts imm
 ## 3. Step-by-Step Deployment
 
 1. **Apply Database Migrations:**
-   Run migrations `002`, `003`, and `004` cleanly (see [DATABASE_MIGRATIONS.md](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/DATABASE_MIGRATIONS.md)).
+   Run migrations `002`, `003`, `004`, and `005` cleanly (see [`DATABASE_MIGRATIONS.md`](./DATABASE_MIGRATIONS.md)).
 2. **Build & Verify Applications:**
    ```bash
    # Backend checks
@@ -75,5 +75,5 @@ Every production startup runs `validate_production_config()`. Startup aborts imm
 
 ## 4. Rollback Procedure
 
-- **Application Rollback:** Shift traffic back to the prior API/Worker/Studio container images. Migrations `002`–`004` are additive and non-destructive, permitting safe minor-version code rollback.
+- **Application Rollback:** Shift traffic back to the prior API/Worker/Studio container images. Migrations `002`–`005` are additive and non-destructive, permitting safe minor-version code rollback.
 - **Database Rollback:** Restore the pre-deploy PostgreSQL snapshot / PITR target if data recovery is required, then run `recover_interrupted_jobs(min_age_seconds=0)` before resuming traffic.

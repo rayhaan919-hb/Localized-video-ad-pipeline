@@ -6,39 +6,41 @@ Video ad generation runs asynchronously via Celery (`services/worker/app/tasks.p
 
 ```
 [API: POST /v1/videos/generate]
-   │ 1. Atomic reserve_credit_atomically (status=CREATED -> QUEUED)
-   │ 2. dispatch_video_job() -> fail-closed check (Redis reachable, worker if required)
+   │ 1. Atomic transaction: VideoJob(CREATED) + reserve_credit_atomically + JobDispatchOutbox(PENDING)
+   │ 2. publish_outbox_event() -> fail-closed check (Redis reachable, worker if required)
    ▼
 [Redis Broker] ──▶ [Celery Worker (worker_prefetch_multiplier=1, acks_late=True)]
                       │
-                      ├── acquire_job_lease(): sets worker_id, lease_expires_at, fencing_token++
-                      ├── _LeaseHeartbeatThread: renews lease every JOB_HEARTBEAT_INTERVAL_SECONDS
+                      ├── acquire_job_lease(): DB-clock lease, worker_id, fencing_token++, ignores terminal/leased jobs
+                      ├── _LeaseHeartbeatThread: renews unexpired active lease via DB clock
                       ├── Stage transitions: UPDATE ... WHERE worker_id=:w AND fencing_token=:tok
                       ├── Success: stores private MP4, transitions COMPLETED, finalize_credit_deduction()
                       ├── Transient error: releases lease, retry_count++, self.retry() with exp backoff+jitter
                       ├── Permanent error: transitions FAILED, refund_credit_atomically() once
-                      └── Worker killed -> lease expires -> recover_interrupted_jobs() increments fencing_token++ & refunds once
+                      └── Worker killed -> lease expires -> recover_expired_leases() (active jobs only; NEVER queued jobs) + reconcile_dispatch_outbox()
 ```
 
 ---
 
-## Guarantees Implemented (Phases 2 & 3)
+## Guarantees Implemented (Phases 2, 3 & Final Hardening)
 
-1. **No Silent Production Fallbacks:**
+1. **No Silent Production Fallbacks & Transactional Dispatch Outbox:**
    - When `APP_ENV=production` or `REQUIRE_REDIS_BROKER=true`, `validate_production_config()` and `configure_celery_app()` forbid `CELERY_ALWAYS_EAGER=true` and forbid `memory://` or unreachable Redis brokers.
-   - If Redis goes down while handling `POST /v1/videos/generate`, `dispatch_video_job()` raises `BrokerUnavailableError`; the API marks the job `FAILED` (`BROKER_UNAVAILABLE`), refunds the reserved credit atomically, and returns `HTTP 503` without switching execution modes.
+   - `POST /v1/videos/generate` writes `VideoJob`, credit reservation, and `JobDispatchOutbox` atomically in a single DB transaction (`005_transactional_outbox_and_rls_hardening.sql`), eliminating post-commit API crash orphans.
+   - If Redis is unreachable on initial `publish_outbox_event(..., fail_job_on_broker_error=True)`, the API marks the job & outbox `FAILED` (`BROKER_UNAVAILABLE`), refunds the reserved credit atomically, and returns `HTTP 503` without switching execution modes. Deferred relays (`reconcile_dispatch_outbox()`) retry transient broker blips with bounded backoff (`max_attempts=5`).
 2. **Timeouts & Retries with Backoff + Jitter:**
    - Celery enforces `task_soft_time_limit` (`300s` default) and `task_time_limit` (`360s` default), `task_acks_late=True`, `worker_prefetch_multiplier=1`, and `task_reject_on_worker_lost=True`.
    - `is_retryable_exception()` separates transient errors (`TransientJobError`, `httpx.TimeoutException`, `SoftTimeLimitExceeded`, HTTP `429`/`5xx` provider errors) from permanent errors (`PermanentJobError`, validation errors, policy violations).
    - `compute_retry_countdown()` computes bounded exponential backoff with randomized jitter (`0.5x`–`1.0x` multiplier up to `JOB_RETRY_MAX_DELAY_SECONDS`). During retries, the original credit reservation stays held without double-charging.
-3. **Exclusive Leases, Heartbeats & Fencing Tokens:**
-   - Before touching external providers or storage, a worker must win `acquire_job_lease()`, which atomically sets `worker_id`, `heartbeat_at`, `lease_expires_at`, and increments `fencing_token`.
-   - Duplicate Celery task deliveries cannot acquire an already-leased active job or re-run a `COMPLETED` / `CANCELLED` job (`skipped_duplicate: True`).
-   - `_LeaseHeartbeatThread` periodically invokes `renew_job_lease()` on a dedicated DB session for the lifetime of long-running AI/FFmpeg execution.
-   - Every intermediate `_fenced_transition()` and final completion/failure update validates `VideoJob.worker_id == owner_id AND VideoJob.fencing_token == fencing_token`. Any stalled worker resuming after lease expiration or cancellation hits `StaleWorkerLeaseError`, cleans up scratch files, and exits without corrupting job state or double-refunding credits.
-4. **Lease-Aware Crash Recovery (`recover_interrupted_jobs()`):**
-   - Active jobs with `lease_expires_at > now` are **never** reclaimed regardless of job age.
-   - Only jobs with expired leases (`lease_expires_at <= now`) or legacy/unleased rows older than `JOB_UNCLAIMED_GRACE_SECONDS` are atomically transitioned to `FAILED` (`WORKER_LEASE_EXPIRED` / `WORKER_INTERRUPTED`), have `fencing_token` incremented, and receive a single idempotent `refund_credit_atomically()`.
+3. **Database-Clock Atomic Leases, Heartbeats & Fencing Tokens:**
+   - All lease comparisons and updates use PostgreSQL `clock_timestamp()` (or SQLite `strftime`) via `db_now_expr()` / `db_offset_expr()` — never skewed multi-host Python timestamps.
+   - `acquire_job_lease()` rejects duplicate deliveries on already-leased active jobs or terminal (`COMPLETED`/`FAILED`/`CANCELLED`) jobs (`skipped_duplicate: True`), and increments `fencing_token` atomically.
+   - `_LeaseHeartbeatThread` periodically invokes `renew_job_lease()`, whose SQL `WHERE` enforces `status IN ACTIVE_EXECUTION_STATUSES AND lease_expires_at > db_now` so an expired or recovered job can never be revived.
+   - Every intermediate `_fenced_transition()`, completion/failure write, and `cancel_video_job()` checks/increments `fencing_token` via compare-and-swap.
+4. **Queued-Safe Lease Recovery (`recover_expired_leases()` / `recover_interrupted_jobs()`):**
+   - Legitimate `CREATED`, `QUEUED`, and `PENDING` jobs waiting under Redis queue congestion are **never** scanned or failed by recovery regardless of age.
+   - `recover_expired_leases()` scans only `ACTIVE_EXECUTION_STATUSES` (`PROCESSING`, `RENDERING`, `GENERATING_CLIPS`, `COMPOSITING`) with `FOR UPDATE SKIP LOCKED` on PostgreSQL and executes an atomic CAS `UPDATE` verifying `(id, status, worker_id, fencing_token, lease_expires_at <= db_now)` before cancelling any pending outbox row and issuing one idempotent `refund_credit_atomically()`.
+   - `recover_interrupted_jobs()` invokes `recover_expired_leases()` and then runs `reconcile_dispatch_outbox()`.
 
 ---
 

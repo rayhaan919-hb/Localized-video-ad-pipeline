@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.2.0] — Final Production Hardening & Commercial Readiness (`production-final-hardening`, 2026-11-20)
+
+### Queued-Job Safe Recovery, Transactional Outbox & DB-Clock Leases (`services/worker/app/tasks.py`, `db.py`, `main.py`, `migrations/005_*`)
+- Separated queued-job handling from active-worker crash recovery: `recover_expired_leases()` scans strictly `ACTIVE_EXECUTION_STATUSES` (`PROCESSING`, `RENDERING`, `GENERATING_CLIPS`, `COMPOSITING`), never marking `CREATED`/`QUEUED`/`PENDING` jobs `FAILED` due to Redis queue wait times.
+- Added transactional dispatch outbox table `job_dispatch_outbox` (`005_transactional_outbox_and_rls_hardening.sql`, `schema.sql`, `app/migrations.py`) committed atomically alongside `VideoJob` creation and credit reservation, plus idempotent `publish_outbox_event()` and `reconcile_dispatch_outbox()`.
+- Eliminated heartbeat-vs-recovery and cancel-vs-complete races using DB-clock expressions (`clock_timestamp()` on PostgreSQL / `strftime` on SQLite), `FOR UPDATE SKIP LOCKED` on PostgreSQL candidate reads, unexpired-lease guards in `renew_job_lease()`, duplicate-delivery/terminal guards in `acquire_job_lease()`, and atomic CAS `fencing_token` increments in `recover_expired_leases()` and `cancel_video_job()`.
+- Scoped PostgreSQL tenant RLS policies explicitly `TO authenticated` with `FORCE ROW LEVEL SECURITY` on `job_dispatch_outbox` (`005`), and set `ON DELETE RESTRICT` on `credit_ledger.workspace_id`.
+
+### Studio BFF Correlation, CI Node 24 Upgrade & Staging Test Suites
+- Echoed worker `X-Request-ID` headers back to browser callers across `apps/studio/src/lib/serverStore.ts` and `apps/studio/src/app/api/v1/renders/[jobId]/route.ts`.
+- Upgraded `.github/workflows/ci.yml` to SHA-pinned Node 24 actions (`checkout`, `setup-python`, `setup-node`), added `mypy app --ignore-missing-imports` (`0` errors across 14 source files), and added live `postgres:16-alpine` + `redis:7-alpine` CI integration jobs.
+- Added env-gated PostgreSQL RLS/concurrency (`test_postgres_integration.py`), live Redis Lua + Celery subprocess recovery (`test_redis_celery_recovery.py`), Stripe/GCP contract + staging suites (`test_staging_integrations.py`), multi-tier benchmark runner (`run_staging_benchmarks.py`), and synchronized documentation with repo-relative links.
+
 ## [2.1.0] — Enterprise Production Hardening & Commercial Readiness (2026-11-20)
 
 ### Background Job Reliability & Safe Crash Recovery (`services/worker/app/tasks.py`, `db.py`, `config.py`)

@@ -34,7 +34,7 @@
 
 ## 2. Exit Criteria Definition & Verification
 
-1. **All Must-story automated functional/security cases pass:** **MET** (`27/27` worker tests + `5/5` Studio tests + Remotion typecheck/lint + Next.js `16.4.6` production build).
+1. **All Must-story automated functional/security cases pass (`v2.0.0` `/qa-gate` historical baseline):** **MET** (`27/27` worker tests + `5/5` Studio tests at `v2.0.0`; superseded by current `production-final-hardening` verification in `AUDIT/PRODUCTION_TEST_RESULTS.md`).
 2. **No open S1 or S2 application bugs:** **MET** (`BUG-001` through `BUG-007` fixed and verified).
 3. **S3 bugs triaged with owner awareness:** **MET** (`BUG-008` & `BUG-009` fixed; `BUG-010` SMTP email delivery documented for buyer prod config).
 4. **Desktop & mobile E2E browser walkthrough passed:** **MET** (`http://127.0.0.1:3000` verified cleanly at `1280x800` and `375x812`, including React 19 + Remotion 4.0.545 playback).

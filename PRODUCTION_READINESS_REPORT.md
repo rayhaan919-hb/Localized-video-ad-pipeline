@@ -1,18 +1,18 @@
 # Production Readiness Report
 
 **Product:** Localized AI Video Ad Pipeline (Non-English D2C SaaS)  
-**Assessment Verdict:** **`CONDITIONALLY READY`**  
+**Assessment Verdict:** **`CONDITIONAL GO — READY FOR STAGING SIGN-OFF`**  
+*(Historical baseline summary from v2.0.0; see [`AUDIT/FINAL_PRODUCTION_READINESS_REPORT.md`](./AUDIT/FINAL_PRODUCTION_READINESS_REPORT.md) and [`AUDIT/FINAL_HARDENING_ACTION_PLAN.md`](./AUDIT/FINAL_HARDENING_ACTION_PLAN.md) alongside the `v2.2.0` hardening reports in `AUDIT/` for current evidence.)*  
 **Scope:** Application architecture, security & multi-tenant isolation, credit ledger & Stripe billing, AI & FFmpeg video pipeline, Next.js Creator Studio BFF + UI, database migrations/RLS, CI workflow, and automated verification.
 
 ---
 
 ## A. Executive Summary
 
-The codebase has been upgraded from a single-tenant mock-first prototype into an isolated multi-tenant SaaS application with server-side authentication, workspace RBAC (`owner`/`admin`/`member`), transactional credit accounting, server-authoritative Stripe Checkout and signed webhook processing, SSRF-protected honest product scraping, strict live Vertex AI Veo / Cloud TTS integrations, private workspace media storage with signed downloads, and fail-closed production startup validation.
+The codebase has been upgraded from a single-tenant mock-first prototype into an isolated multi-tenant SaaS application with server-side authentication, workspace RBAC (`owner`/`admin`/`member`), transactional credit accounting, server-authoritative Stripe Checkout and signed webhook processing, SSRF-protected honest product scraping, strict live Vertex AI Veo / Cloud TTS integrations, private workspace media storage with signed downloads, transactional outbox + DB-clock atomic worker leases, and fail-closed production startup validation.
 
-**Verdict — `CONDITIONALLY READY`:**  
-All application code, security guardrails, database migrations, billing handlers, FFmpeg validation paths, dependency security (`npm audit --omit=dev`: `0 vulnerabilities` under React `19.3.1`, Next.js `16.4.6`, and Remotion `4.0.545`), and automated unit/integration tests pass locally (`27/27` worker tests, `5/5` studio tests, clean TypeScript/ESLint/Ruff checks, clean Next.js `16.4.6` Turbopack production build). It is rated **CONDITIONALLY READY** rather than **UNCONDITIONALLY PRODUCTION READY** because:
-1. Live cloud rendering (`Vertex AI Veo 3.1`, `Google Cloud Text-to-Speech`, `GCS`), live payment settlement (`Stripe Live Webhooks`), transactional email delivery (SMTP), and managed `PostgreSQL / Supabase` RLS execution could only be tested via local SQLite/WAL, local FFmpeg binaries, static SQL inspection, and mocked external HTTP contracts (no buyer live GCP/Stripe/Supabase credentials exist in this workspace).
+**Verdict — `CONDITIONAL GO`:**  
+At the initial `v2.0.0` commercial hardening baseline (`27/27` worker tests, `5/5` studio tests under Next.js `16.4.6` / React `19.3.1` / Remotion `4.0.545`), all core security & isolation fixes passed locally; subsequent `v2.1.0` & `v2.2.0` hardening expanded test coverage, upgraded CI to Node 24 SHA-pinned actions with live PostgreSQL 16 + Redis 7 service jobs, and resolved queued-job recovery & heartbeat races (tracked in [`TESTING_GUIDE.md`](./TESTING_GUIDE.md) and `AUDIT/PRODUCTION_TEST_RESULTS.md`). Live external integrations remain gated on buyer staging credentials (`PostgreSQL`, `Redis`, `Stripe`, `GCP`, `SMTP`).
 
 ---
 
