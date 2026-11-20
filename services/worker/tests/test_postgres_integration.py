@@ -89,13 +89,25 @@ def _apply_sql_migrations_cleanly(engine) -> None:
     with engine.begin() as conn:
         for mf in migration_files:
             conn.exec_driver_sql(mf.read_text(encoding="utf-8"))
-        # Grant table access so authenticated NOBYPASSRLS roles evaluate RLS policies directly.
+        # Grant table access so authenticated/anon NOBYPASSRLS roles evaluate RLS directly.
         conn.execute(text("GRANT USAGE ON SCHEMA public TO authenticated, anon"))
         conn.execute(
             text(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON "
                 "workspaces, workspace_members, workspace_assets, video_jobs, credit_ledger "
                 "TO authenticated"
+            )
+        )
+        conn.execute(
+            text(
+                "GRANT SELECT ON job_dispatch_outbox, users, auth_sessions, stripe_events "
+                "TO authenticated"
+            )
+        )
+        conn.execute(
+            text(
+                "GRANT SELECT ON workspaces, video_jobs, credit_ledger, "
+                "job_dispatch_outbox, users TO anon"
             )
         )
 
@@ -454,7 +466,7 @@ def test_pg_nobypss_rls_tenant_a_vs_tenant_b_vs_anon_isolation(pg_env: str) -> N
                 job_id=job_a_id,
                 workspace_id=ws_a.id,
                 payload_json={"job_id": job_a_id},
-                status="PENDING",
+                status="CANCELLED",
                 created_at=utcnow(),
                 updated_at=utcnow(),
             )
@@ -521,11 +533,15 @@ def test_pg_nobypss_rls_tenant_a_vs_tenant_b_vs_anon_isolation(pg_env: str) -> N
             assert job_b_id in visible_jobs_b
             assert job_a_id not in visible_jobs_b
 
-        # Anon context sees 0 tenant rows
+        # Anon context sees 0 tenant/internal rows (TO authenticated scoping)
         with raw_engine.begin() as conn:
             conn.execute(text("SET LOCAL ROLE anon"))
             anon_jobs = conn.execute(text("SELECT id FROM video_jobs")).fetchall()
             assert anon_jobs == []
+            anon_ws = conn.execute(text("SELECT id FROM workspaces")).fetchall()
+            assert anon_ws == []
+            anon_outbox = conn.execute(text("SELECT id FROM job_dispatch_outbox")).fetchall()
+            assert anon_outbox == []
     finally:
         with raw_engine.begin() as conn:
             conn.execute(text(f"DROP ROLE IF EXISTS {temp_role}"))

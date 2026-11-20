@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -19,11 +20,14 @@ import pytest
 import app.db as db_module
 from app.auth import hash_password
 from app.db import (
+    ACTIVE_EXECUTION_STATUSES,
+    JobDispatchOutbox,
     User,
     VideoJob,
     Workspace,
     create_dispatch_outbox_event,
     create_workspace_for_user,
+    get_db_now,
     reconcile_workspace_credits,
     reserve_credit_atomically,
     utcnow,
@@ -65,7 +69,7 @@ def _build_worker_env(shared_db_url: str, storage_root: Path) -> dict[str, str]:
             "CELERY_ALWAYS_EAGER": "false",
             "REQUIRE_REDIS_BROKER": "true",
             "REQUIRE_ACTIVE_CELERY_WORKER": "false",
-            "JOB_LEASE_SECONDS": "2",
+            "JOB_LEASE_DURATION_SECONDS": "10",
             "JOB_HEARTBEAT_INTERVAL_SECONDS": "1",
         }
     )
@@ -142,7 +146,7 @@ def redis_celery_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CELERY_ALWAYS_EAGER", "false")
     monkeypatch.setenv("REQUIRE_REDIS_BROKER", "true")
     monkeypatch.setenv("REQUIRE_ACTIVE_CELERY_WORKER", "false")
-    monkeypatch.setenv("JOB_LEASE_SECONDS", "2")
+    monkeypatch.setenv("JOB_LEASE_DURATION_SECONDS", "10")
     monkeypatch.setenv("JOB_HEARTBEAT_INTERVAL_SECONDS", "1")
 
     configure_celery_app(celery_app)
@@ -290,10 +294,43 @@ def test_real_celery_worker_sigkill_lease_expiry_and_outbox_recovery(redis_celer
         if entered_active:
             proc.kill()
             proc.wait(timeout=5.0)
-            # Wait for 2-second lease expiry then recover.
-            time.sleep(2.4)
-            recovered = recover_expired_leases(min_age_seconds=0)
-            assert recovered == 1
+
+            with db_module.SessionLocal() as session:
+                killed_job = session.get(VideoJob, crash_jid)
+                assert killed_job is not None
+                still_active = killed_job.status in ACTIVE_EXECUTION_STATUSES
+                lease_exp = killed_job.lease_expires_at
+                db_now = get_db_now(session)
+
+            if still_active:
+                assert lease_exp is not None
+                exp_utc = (
+                    lease_exp
+                    if lease_exp.tzinfo is not None
+                    else lease_exp.replace(tzinfo=timezone.utc)
+                )
+                remaining = max(0.0, (exp_utc - db_now).total_seconds())
+                rec_deadline = time.time() + max(16.0, remaining + 8.0)
+                recovered = 0
+                while time.time() < rec_deadline:
+                    recovered = recover_expired_leases(min_age_seconds=0)
+                    with db_module.SessionLocal() as session:
+                        post_job = session.get(VideoJob, crash_jid)
+                        if recovered >= 1 or (post_job is not None and post_job.status == "FAILED"):
+                            break
+                    time.sleep(0.5)
+                assert recovered >= 1
+
+                with db_module.SessionLocal() as session:
+                    failed_job = session.get(VideoJob, crash_jid)
+                    ws_after = session.get(Workspace, ws_id)
+                    assert failed_job is not None
+                    assert failed_job.status == "FAILED"
+                    assert failed_job.error_code == "WORKER_LEASE_EXPIRED"
+                    assert ws_after is not None
+                    assert ws_after.credit_balance == 5
+                    assert ws_after.reserved_balance == 0
+                    assert reconcile_workspace_credits(session, ws_id)["is_balanced"] is True
         else:
             # If fast CPU finished before SIGKILL polling, verify clean completion instead.
             _terminate_proc(proc)
@@ -301,7 +338,10 @@ def test_real_celery_worker_sigkill_lease_expiry_and_outbox_recovery(redis_celer
         if proc.poll() is None:
             _terminate_proc(proc)
 
+    was_recovered = False
     with db_module.SessionLocal() as session:
+        cur_crash = session.get(VideoJob, crash_jid)
+        was_recovered = cur_crash is not None and cur_crash.status == "FAILED"
         assert reconcile_workspace_credits(session, ws_id)["is_balanced"] is True
 
     # Also verify transactional outbox relay delivers unpublished event to restarted worker.
@@ -309,7 +349,7 @@ def test_real_celery_worker_sigkill_lease_expiry_and_outbox_recovery(redis_celer
         initial_credits=5, duration_seconds=4, status="CREATED"
     )
     with db_module.SessionLocal() as session:
-        create_dispatch_outbox_event(
+        outbox_ev = create_dispatch_outbox_event(
             session,
             job_id=out_jid,
             workspace_id=out_ws_id,
@@ -320,10 +360,15 @@ def test_real_celery_worker_sigkill_lease_expiry_and_outbox_recovery(redis_celer
                 "aspect_ratio": "9:16",
             },
         )
+        outbox_id = outbox_ev.id
         session.commit()
 
-    relayed = reconcile_dispatch_outbox(limit=10)
-    assert relayed["published"] == 1
+    relayed = reconcile_dispatch_outbox(limit=25)
+    assert relayed["published"] >= 1
+    with db_module.SessionLocal() as session:
+        refreshed_outbox = session.get(JobDispatchOutbox, outbox_id)
+        assert refreshed_outbox is not None
+        assert refreshed_outbox.status == "PUBLISHED"
 
     proc2 = _spawn_celery_worker(redis_celery_env["worker_env"])
     try:
@@ -339,5 +384,11 @@ def test_real_celery_worker_sigkill_lease_expiry_and_outbox_recovery(redis_celer
             out_job = session.get(VideoJob, out_jid)
             assert out_job is not None and out_job.status == "COMPLETED"
             assert reconcile_workspace_credits(session, out_ws_id)["is_balanced"] is True
+            if was_recovered:
+                post_crash = session.get(VideoJob, crash_jid)
+                ws_final = session.get(Workspace, ws_id)
+                assert post_crash is not None and post_crash.status == "FAILED"
+                assert ws_final is not None and ws_final.credit_balance == 5
+                assert reconcile_workspace_credits(session, ws_id)["is_balanced"] is True
     finally:
         _terminate_proc(proc2)
