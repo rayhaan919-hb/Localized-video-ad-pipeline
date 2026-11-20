@@ -47,6 +47,10 @@ select = ["E", "F", "I", "W"]
 pythonpath = ["."]
 testpaths = ["tests"]
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "postgres_integration: requires live PostgreSQL via TEST_POSTGRES_URL",
+    "redis_celery_integration: requires live Redis & Celery via TEST_REDIS_URL",
+]
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
