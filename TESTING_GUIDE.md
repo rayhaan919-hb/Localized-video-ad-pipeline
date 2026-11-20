@@ -63,9 +63,12 @@ npm run verify:studio
 # Production NPM dependency audit (high/critical gate)
 npm audit --omit=dev --audit-level=high
 
-# Python CVE audit (requires dev extras installed, enforced in CI)
+# Python CVE audit (excludes local editable package; requires dev extras, enforced in CI)
 cd services/worker
-pip-audit --strict --desc
+python -m pip freeze --exclude-editable | grep -ivE '^(localized[-_]video[-_]ad[-_]worker([= <>~!@]|$)|.*@ file://)' > /tmp/pip-audit-reqs.txt
+test -s /tmp/pip-audit-reqs.txt
+pip-audit --no-deps --disable-pip --strict --desc -r /tmp/pip-audit-reqs.txt
+rm -f /tmp/pip-audit-reqs.txt
 ```
 
 CI ([.github/workflows/ci.yml](file:///C:/Users/Admin/.gemini/antigravity/scratch/localized-video-ad-pipeline/.github/workflows/ci.yml)) additionally runs secret pattern scanning across `apps/`, `packages/`, `services/`, and `schema.sql`.

@@ -47,7 +47,11 @@ jobs:
           rm -f ./ci_migration_smoke.db
 
       - name: Audit Python dependencies for known CVEs
-        run: pip-audit --strict --desc
+        run: |
+          python -m pip freeze --exclude-editable | grep -ivE '^(localized[-_]video[-_]ad[-_]worker([= <>~!@]|$)|.*@ file://)' > /tmp/pip-audit-reqs.txt
+          test -s /tmp/pip-audit-reqs.txt
+          pip-audit --no-deps --disable-pip --strict --desc -r /tmp/pip-audit-reqs.txt
+          rm -f /tmp/pip-audit-reqs.txt
 
   studio-and-remotion-verify:
     name: Remotion & Next.js Studio Typecheck, Lint, Test & Build
