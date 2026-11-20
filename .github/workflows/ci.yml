@@ -5,20 +5,20 @@ permissions:
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, production-final-hardening]
   pull_request:
     branches: [main, master]
 
 jobs:
   worker-verify:
-    name: Python Worker Lint, Security & Tests
+    name: Python Worker Lint, Typecheck, Security & Tests
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: services/worker
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install FFmpeg
         run: |
@@ -26,17 +26,20 @@ jobs:
           sudo apt-get install -y ffmpeg
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev]" mypy
 
       - name: Run Ruff lint checks
         run: ruff check .
+
+      - name: Run mypy static type checks
+        run: mypy app --ignore-missing-imports
 
       - name: Run Pytest security, reliability, billing & rendering suite
         run: pytest -v
@@ -53,15 +56,69 @@ jobs:
           pip-audit --no-deps --disable-pip --strict --desc -r /tmp/pip-audit-reqs.txt
           rm -f /tmp/pip-audit-reqs.txt
 
+  postgres-redis-integration:
+    name: Live PostgreSQL 16 RLS & Redis 7 Celery Integration
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/worker
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lva_ci
+          POSTGRES_PASSWORD: lva_ci_password
+          POSTGRES_DB: localized_video_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U lva_ci -d localized_video_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install worker and Postgres/Redis drivers
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" "psycopg[binary]" redis
+
+      - name: Run PostgreSQL RLS/concurrency & Redis/Celery recovery tests
+        env:
+          TEST_POSTGRES_URL: postgresql+psycopg://lva_ci:lva_ci_password@127.0.0.1:5432/localized_video_test
+          TEST_REDIS_URL: redis://127.0.0.1:6379/0
+        run: pytest -v tests/test_postgres_integration.py tests/test_redis_celery_recovery.py
+
   studio-and-remotion-verify:
     name: Remotion & Next.js Studio Typecheck, Lint, Test & Build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
           cache: npm

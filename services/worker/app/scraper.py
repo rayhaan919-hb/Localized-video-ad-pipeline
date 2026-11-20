@@ -123,7 +123,7 @@ def resolve_and_validate_host_ips(
     validated_ips: list[str] = []
     for info in infos:
         sockaddr = info[4]
-        resolved_ip = sockaddr[0].split("%")[0]
+        resolved_ip = str(sockaddr[0]).split("%")[0]
         ip_obj = ipaddress.ip_address(resolved_ip)
         if _is_forbidden_ip(ip_obj):
             raise UnsafeUrlError(f"URL host resolved to forbidden private IP: {resolved_ip}")

@@ -449,15 +449,15 @@ def _process_stripe_webhook_inner(
 
     if event_type in ("charge.refunded", "charge.dispute.created"):
         payment_intent_id = str(obj.get("payment_intent") or "").strip()
-        purchase_event = None
+        matched_purchase: StripeEvent | None = None
         if payment_intent_id:
-            purchase_event = session.scalar(
+            matched_purchase = session.scalar(
                 select(StripeEvent).where(
                     StripeEvent.payment_intent_id == payment_intent_id,
                     StripeEvent.credits_delta > 0,
                 )
             )
-        if purchase_event is None or not purchase_event.workspace_id:
+        if matched_purchase is None or not matched_purchase.workspace_id:
             session.add(
                 StripeEvent(
                     id=str(uuid.uuid4()),
@@ -483,8 +483,8 @@ def _process_stripe_webhook_inner(
             )
             or 0
         )
-        original_credits = int(purchase_event.credits_delta)
-        amount_total = int(purchase_event.amount_cents or obj.get("amount") or 0)
+        original_credits = int(matched_purchase.credits_delta)
+        amount_total = int(matched_purchase.amount_cents or obj.get("amount") or 0)
         amount_refunded = int(obj.get("amount_refunded") or obj.get("amount") or amount_total)
         if amount_total > 0 and amount_refunded < amount_total:
             target_total_revoked = max(
@@ -497,7 +497,7 @@ def _process_stripe_webhook_inner(
             0, min(original_credits, target_total_revoked) - already_revoked
         )
         if credits_to_revoke == 0:
-            ws_cur = session.get(Workspace, purchase_event.workspace_id)
+            ws_cur = session.get(Workspace, matched_purchase.workspace_id)
             cur_balance = int(ws_cur.credit_balance) if ws_cur else 0
             session.add(
                 StripeEvent(
@@ -505,11 +505,11 @@ def _process_stripe_webhook_inner(
                     stripe_event_id=event_id,
                     event_type=event_type,
                     payment_intent_id=payment_intent_id,
-                    workspace_id=purchase_event.workspace_id,
-                    user_id=purchase_event.user_id,
-                    pack_id=purchase_event.pack_id,
+                    workspace_id=matched_purchase.workspace_id,
+                    user_id=matched_purchase.user_id,
+                    pack_id=matched_purchase.pack_id,
                     amount_cents=amount_refunded,
-                    currency=purchase_event.currency,
+                    currency=matched_purchase.currency,
                     credits_delta=0,
                     status="refund_already_accounted",
                     payload_summary={
@@ -530,11 +530,11 @@ def _process_stripe_webhook_inner(
 
         new_balance, actual_revoked = reverse_credits_for_payment_refund(
             session,
-            workspace_id=purchase_event.workspace_id,
+            workspace_id=matched_purchase.workspace_id,
             credits_to_revoke=credits_to_revoke,
             payment_id=payment_intent_id,
             idempotency_key=f"stripe_refund:{event_id}",
-            user_id=purchase_event.user_id,
+            user_id=matched_purchase.user_id,
             reason=f"Stripe {event_type} for payment {payment_intent_id}",
             metadata={
                 "stripe_event_id": event_id,
@@ -548,11 +548,11 @@ def _process_stripe_webhook_inner(
                 stripe_event_id=event_id,
                 event_type=event_type,
                 payment_intent_id=payment_intent_id,
-                workspace_id=purchase_event.workspace_id,
-                user_id=purchase_event.user_id,
-                pack_id=purchase_event.pack_id,
+                workspace_id=matched_purchase.workspace_id,
+                user_id=matched_purchase.user_id,
+                pack_id=matched_purchase.pack_id,
                 amount_cents=amount_refunded,
-                currency=purchase_event.currency,
+                currency=matched_purchase.currency,
                 credits_delta=-actual_revoked,
                 status="refund_processed",
                 payload_summary={"new_balance": new_balance, "revoked": actual_revoked},
