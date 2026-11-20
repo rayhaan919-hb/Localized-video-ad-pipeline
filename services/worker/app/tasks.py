@@ -8,27 +8,30 @@ import random
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 from celery import Celery
 from celery.exceptions import Retry as CeleryRetry
 from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 
 import app.db as db_module
 from app.compositor import composite_final_video
 from app.config import is_redis_reachable, settings
 from app.db import (
+    ACTIVE_EXECUTION_STATUSES,
+    JobDispatchOutbox,
     VideoJob,
     WorkspaceAsset,
     acquire_job_lease,
+    db_dialect_name,
+    db_now_expr,
+    db_offset_expr,
     finalize_credit_deduction,
     refund_credit_atomically,
     release_job_lease,
     renew_job_lease,
-    utcnow,
 )
 from app.scraper import (
     UnsafeUrlError,
@@ -61,14 +64,6 @@ class PermanentJobError(RuntimeError):
 
 class StaleWorkerLeaseError(RuntimeError):
     """Raised when a worker attempts to mutate a job after losing its fencing lease."""
-
-
-def _as_utc(dt: datetime | None) -> datetime | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
 
 
 def configure_celery_app(target_app: Celery | None = None) -> dict[str, Any]:
@@ -302,6 +297,271 @@ def dispatch_video_job(
     return "eager" if eager else "queued"
 
 
+def _apply_outbox_dispatch_failure(
+    *,
+    outbox_id: str,
+    job_id: str,
+    exc: Exception,
+    attempts: int,
+    max_attempts: int,
+    fail_job_on_broker_error: bool,
+) -> dict[str, Any]:
+    """Handle broker/dispatch errors with bounded backoff retries or terminal refund."""
+    err_text = str(exc)[:400] or type(exc).__name__
+    err_code = (
+        "BROKER_UNAVAILABLE" if isinstance(exc, BrokerUnavailableError) else "QUEUE_DISPATCH_FAILED"
+    )
+    should_fail_terminal = fail_job_on_broker_error or attempts >= max_attempts
+
+    with db_module.SessionLocal() as session:
+        now_sql = db_now_expr(session)
+        job = session.get(VideoJob, job_id)
+        if not should_fail_terminal:
+            backoff_s = min(60.0, float(2.0 * (2 ** max(0, attempts - 1))))
+            next_at_sql = db_offset_expr(session, backoff_s)
+            if job is not None and job.status == "QUEUED" and job.worker_id is None:
+                session.execute(
+                    update(VideoJob)
+                    .where(
+                        VideoJob.id == job_id,
+                        VideoJob.status == "QUEUED",
+                        VideoJob.worker_id.is_(None),
+                    )
+                    .values(
+                        status="CREATED",
+                        stage_detail="Waiting to publish dispatch event to queue",
+                        updated_at=now_sql,
+                    )
+                )
+            session.execute(
+                update(JobDispatchOutbox)
+                .where(JobDispatchOutbox.id == outbox_id)
+                .values(
+                    status="PENDING",
+                    next_attempt_at=next_at_sql,
+                    last_error=err_text,
+                    updated_at=now_sql,
+                )
+            )
+            session.commit()
+            metrics_registry.incr("outbox.retried")
+            return {
+                "status": "retry_scheduled",
+                "outbox_id": outbox_id,
+                "job_id": job_id,
+                "attempts": attempts,
+                "error": err_text,
+            }
+
+        session.execute(
+            update(JobDispatchOutbox)
+            .where(JobDispatchOutbox.id == outbox_id)
+            .values(status="FAILED", last_error=err_text, updated_at=now_sql)
+        )
+        if job is not None:
+            hist = list((job.script_json or {}).get("status_history") or ["CREATED", "QUEUED"])
+            if "FAILED" not in hist:
+                hist.append("FAILED")
+            next_script = dict(job.script_json or {})
+            next_script["status_history"] = hist
+            upd_fail = session.execute(
+                update(VideoJob)
+                .where(
+                    VideoJob.id == job_id,
+                    VideoJob.status.in_(("CREATED", "QUEUED", "PENDING")),
+                    VideoJob.worker_id.is_(None),
+                )
+                .values(
+                    status="FAILED",
+                    progress_pct=0,
+                    error_code=(
+                        err_code if fail_job_on_broker_error else "OUTBOX_DISPATCH_EXHAUSTED"
+                    ),
+                    error_message="Could not enqueue background render job; credit refunded.",
+                    stage_detail="Dispatch failed — credit refunded",
+                    fencing_token=VideoJob.fencing_token + 1,
+                    script_json=next_script,
+                    updated_at=now_sql,
+                )
+            )
+            if int(upd_fail.rowcount or 0) == 1:
+                refund_credit_atomically(
+                    session,
+                    workspace_id=job.workspace_id,
+                    job_id=job_id,
+                    user_id=job.user_id,
+                    cost=int(job.reserved_credits or 1),
+                    reason=f"Queue dispatch failed: {type(exc).__name__}",
+                )
+        session.commit()
+
+    metrics_registry.incr("outbox.failed")
+    if fail_job_on_broker_error:
+        raise exc
+    return {
+        "status": "failed",
+        "outbox_id": outbox_id,
+        "job_id": job_id,
+        "attempts": attempts,
+        "error": err_text,
+    }
+
+
+def publish_outbox_event(
+    outbox_id: str | uuid.UUID,
+    *,
+    fail_job_on_broker_error: bool = False,
+) -> dict[str, Any]:
+    """Claim and dispatch a single durable outbox event idempotently."""
+    outbox_str = str(uuid.UUID(str(outbox_id)))
+    with db_module.SessionLocal() as session:
+        now_sql = db_now_expr(session)
+        stale_pub_cutoff = db_offset_expr(session, -60.0)
+        claim_stmt = (
+            update(JobDispatchOutbox)
+            .where(
+                JobDispatchOutbox.id == outbox_str,
+                or_(
+                    and_(
+                        JobDispatchOutbox.status == "PENDING",
+                        JobDispatchOutbox.next_attempt_at <= now_sql,
+                    ),
+                    and_(
+                        JobDispatchOutbox.status == "PUBLISHING",
+                        JobDispatchOutbox.updated_at <= stale_pub_cutoff,
+                    ),
+                ),
+            )
+            .values(
+                status="PUBLISHING",
+                attempts=JobDispatchOutbox.attempts + 1,
+                updated_at=now_sql,
+            )
+            .returning(
+                JobDispatchOutbox.job_id,
+                JobDispatchOutbox.workspace_id,
+                JobDispatchOutbox.payload_json,
+                JobDispatchOutbox.attempts,
+                JobDispatchOutbox.max_attempts,
+            )
+        )
+        claimed = session.execute(claim_stmt).fetchone()
+        if claimed is None:
+            session.commit()
+            return {"status": "skipped", "outbox_id": outbox_str}
+
+        job_id = str(claimed[0])
+        payload = dict(claimed[2] or {})
+        attempts = int(claimed[3] or 1)
+        max_attempts = int(claimed[4] or 5)
+
+        job = session.get(VideoJob, job_id)
+        if job is None or job.status in ("COMPLETED", "FAILED", "CANCELLED"):
+            session.execute(
+                update(JobDispatchOutbox)
+                .where(JobDispatchOutbox.id == outbox_str)
+                .values(status="CANCELLED", updated_at=now_sql)
+            )
+            session.commit()
+            metrics_registry.incr("outbox.cancelled")
+            return {"status": "cancelled", "outbox_id": outbox_str, "job_id": job_id}
+
+        next_script = dict(job.script_json or {})
+        hist = list(next_script.get("status_history") or ["CREATED"])
+        if "QUEUED" not in hist:
+            hist.append("QUEUED")
+        next_script["status_history"] = hist
+
+        session.execute(
+            update(VideoJob)
+            .where(VideoJob.id == job_id, VideoJob.status == "CREATED")
+            .values(
+                status="QUEUED",
+                progress_pct=10,
+                stage_detail="Queued for AI generation & rendering",
+                script_json=next_script,
+                updated_at=now_sql,
+            )
+        )
+        session.commit()
+
+    try:
+        dispatch_mode = dispatch_video_job(
+            job_id=job_id,
+            ad_angle=str(payload.get("ad_angle") or "problem_solution"),
+            simulate_failure=bool(payload.get("simulate_failure", False)),
+            custom_props=payload.get("custom_props"),
+            duration_seconds=float(payload.get("duration_seconds") or 4.0),
+            aspect_ratio=str(payload.get("aspect_ratio") or "9:16"),
+            correlation_id=payload.get("correlation_id"),
+        )
+    except Exception as exc:
+        return _apply_outbox_dispatch_failure(
+            outbox_id=outbox_str,
+            job_id=job_id,
+            exc=exc,
+            attempts=attempts,
+            max_attempts=max_attempts,
+            fail_job_on_broker_error=fail_job_on_broker_error,
+        )
+
+    with db_module.SessionLocal() as session:
+        now_sql = db_now_expr(session)
+        session.execute(
+            update(JobDispatchOutbox)
+            .where(JobDispatchOutbox.id == outbox_str, JobDispatchOutbox.status == "PUBLISHING")
+            .values(
+                status="PUBLISHED",
+                published_at=now_sql,
+                last_error=None,
+                updated_at=now_sql,
+            )
+        )
+        session.commit()
+    metrics_registry.incr("outbox.published")
+    return {
+        "status": "published",
+        "outbox_id": outbox_str,
+        "job_id": job_id,
+        "dispatch_mode": dispatch_mode,
+    }
+
+
+def reconcile_dispatch_outbox(*, limit: int = 50) -> dict[str, int]:
+    """Publish pending or stalled transactional outbox rows reliably without double-dispatching."""
+    counts = {"published": 0, "retried": 0, "failed": 0, "cancelled": 0, "skipped": 0}
+    with db_module.SessionLocal() as session:
+        now_sql = db_now_expr(session)
+        stale_pub_cutoff = db_offset_expr(session, -60.0)
+        stmt = (
+            select(JobDispatchOutbox.id)
+            .where(
+                or_(
+                    and_(
+                        JobDispatchOutbox.status == "PENDING",
+                        JobDispatchOutbox.next_attempt_at <= now_sql,
+                    ),
+                    and_(
+                        JobDispatchOutbox.status == "PUBLISHING",
+                        JobDispatchOutbox.updated_at <= stale_pub_cutoff,
+                    ),
+                )
+            )
+            .order_by(JobDispatchOutbox.created_at.asc())
+            .limit(max(1, int(limit)))
+        )
+        outbox_ids = [str(oid) for oid in session.scalars(stmt).all()]
+
+    for outbox_id in outbox_ids:
+        res = publish_outbox_event(outbox_id, fail_job_on_broker_error=False)
+        status_key = res.get("status", "skipped")
+        if status_key == "retry_scheduled":
+            counts["retried"] += 1
+        elif status_key in counts:
+            counts[status_key] += 1
+    return counts
+
+
 class _LeaseHeartbeatThread:
     """Periodic daemon heartbeat keeping a worker's lease fresh during long-running renders."""
 
@@ -479,6 +739,10 @@ def _execute_leased_job_attempt(
             detail: str,
             script: dict[str, Any] | None = None,
         ) -> None:
+            if heartbeat.lease_lost:
+                raise StaleWorkerLeaseError(
+                    f"Worker '{owner_id}' lost lease heartbeat on job {normalized_job_id}."
+                )
             if new_status not in history:
                 history.append(new_status)
             existing_row = session.get(VideoJob, normalized_job_id)
@@ -489,7 +753,7 @@ def _execute_leased_job_attempt(
             if stage_timings_ms:
                 next_script["stage_timings_ms"] = dict(stage_timings_ms)
 
-            now = utcnow()
+            now_sql = db_now_expr(session)
             res = session.execute(
                 update(VideoJob)
                 .where(
@@ -503,8 +767,8 @@ def _execute_leased_job_attempt(
                     progress_pct=progress,
                     stage_detail=detail,
                     script_json=next_script,
-                    heartbeat_at=now,
-                    updated_at=now,
+                    heartbeat_at=now_sql,
+                    updated_at=now_sql,
                 )
             )
             if int(res.rowcount or 0) == 0:
@@ -691,7 +955,6 @@ def _execute_leased_job_attempt(
             if source_clip_path:
                 source_clip_path.unlink(missing_ok=True)
 
-            completed_at = utcnow()
             total_ms = round((time.perf_counter() - job_started) * 1000.0, 2)
             stage_timings_ms["total_ms"] = total_ms
             metrics_registry.observe_ms("job.total", total_ms)
@@ -703,6 +966,7 @@ def _execute_leased_job_attempt(
             script_data["status_history"] = list(history)
             script_data["stage_timings_ms"] = dict(stage_timings_ms)
 
+            now_sql = db_now_expr(session)
             upd_res = session.execute(
                 update(VideoJob)
                 .where(
@@ -715,15 +979,15 @@ def _execute_leased_job_attempt(
                     veo_gcs_uri=veo_result.gcs_uri,
                     storage_rel_path=asset.storage_rel_path,
                     final_mp4_url=f"/api/v1/renders/{normalized_job_id}",
-                    completed_at=completed_at,
+                    completed_at=now_sql,
                     status="COMPLETED",
                     progress_pct=100,
                     stage_detail="Completed and verified in workspace private storage",
                     script_json=dict(script_data),
                     worker_id=None,
                     lease_expires_at=None,
-                    heartbeat_at=completed_at,
-                    updated_at=completed_at,
+                    heartbeat_at=now_sql,
+                    updated_at=now_sql,
                 )
             )
             if int(upd_res.rowcount or 0) == 0:
@@ -856,7 +1120,7 @@ def _execute_leased_job_attempt(
                         script_json=retry_script,
                         worker_id=None,
                         lease_expires_at=None,
-                        updated_at=utcnow(),
+                        updated_at=db_now_expr(session),
                     )
                 )
                 session.commit()
@@ -898,7 +1162,7 @@ def _execute_leased_job_attempt(
             if stage_timings_ms:
                 err_payload["stage_timings_ms"] = dict(stage_timings_ms)
 
-            now = utcnow()
+            now_sql = db_now_expr(session)
             upd_fail = session.execute(
                 update(VideoJob)
                 .where(
@@ -916,7 +1180,8 @@ def _execute_leased_job_attempt(
                     script_json=err_payload,
                     worker_id=None,
                     lease_expires_at=None,
-                    updated_at=now,
+                    fencing_token=VideoJob.fencing_token + 1,
+                    updated_at=now_sql,
                 )
             )
             refunded_balance = None
@@ -1010,51 +1275,79 @@ def process_video_job(
             raise
 
 
-def recover_interrupted_jobs(min_age_seconds: int | None = None) -> int:
-    """Safely recover abandoned jobs whose worker leases expired without touching live workers."""
-    in_flight_statuses = (
-        "CREATED",
-        "QUEUED",
-        "PROCESSING",
-        "RENDERING",
-        "PENDING",
-        "GENERATING_CLIPS",
-        "COMPOSITING",
-    )
-    grace_seconds = (
-        0 if min_age_seconds is None else max(0, int(min_age_seconds))
-    )
-    recovered = 0
-    now = utcnow()
-    unleased_cutoff = now - timedelta(seconds=grace_seconds)
+def recover_expired_leases(min_age_seconds: int | None = None) -> int:
+    """Atomically recover genuinely expired active-worker jobs using DB clock & CAS.
 
-    with db_module.SessionLocal() as session:
+    Legitimate CREATED/QUEUED/PENDING jobs waiting in Redis are NEVER marked failed here.
+    Every candidate recovery re-validates status, worker_id, fencing_token, and DB-clock
+    expiration inside the UPDATE statement itself so concurrent heartbeat renewals never lose.
+    """
+    grace_seconds = 0 if min_age_seconds is None else max(0, int(min_age_seconds))
+    recovered = 0
+
+    with db_module.SessionLocal() as scan_session:
+        now_sql = db_now_expr(scan_session)
         candidates = list(
-            session.scalars(
-                select(VideoJob).where(VideoJob.status.in_(in_flight_statuses))
+            scan_session.execute(
+                select(
+                    VideoJob.id,
+                    VideoJob.worker_id,
+                    VideoJob.fencing_token,
+                    VideoJob.lease_expires_at,
+                ).where(
+                    VideoJob.status.in_(ACTIVE_EXECUTION_STATUSES),
+                    or_(
+                        and_(
+                            VideoJob.lease_expires_at.is_not(None),
+                            VideoJob.lease_expires_at <= now_sql,
+                        ),
+                        and_(
+                            VideoJob.worker_id.is_(None),
+                            VideoJob.lease_expires_at.is_(None),
+                        ),
+                    ),
+                )
             ).all()
         )
-        for job in candidates:
-            lease_exp = _as_utc(job.lease_expires_at)
-            updated_at = _as_utc(job.updated_at)
 
-            # Never reclaim a job held by an active worker with a valid unexpired lease!
-            if lease_exp is not None and lease_exp > now:
+    for job_id, observed_worker_id, observed_token, observed_lease_exp in candidates:
+        with db_module.SessionLocal() as job_session:
+            row_q = select(VideoJob).where(VideoJob.id == job_id)
+            if db_dialect_name(job_session) == "postgresql":
+                row_q = row_q.with_for_update(skip_locked=True)
+            job = job_session.scalar(row_q)
+            if job is None or job.status not in ACTIVE_EXECUTION_STATUSES:
+                job_session.rollback()
                 continue
 
-            if lease_exp is not None:
-                is_expired_lease = lease_exp <= now
-                if not is_expired_lease:
-                    continue
+            now_sql = db_now_expr(job_session)
+            where_clauses = [
+                VideoJob.id == job_id,
+                VideoJob.status.in_(ACTIVE_EXECUTION_STATUSES),
+                VideoJob.fencing_token == int(observed_token or 0),
+                VideoJob.worker_id == observed_worker_id
+                if observed_worker_id is not None
+                else VideoJob.worker_id.is_(None),
+            ]
+
+            if observed_lease_exp is not None:
+                where_clauses.extend(
+                    [
+                        VideoJob.lease_expires_at.is_not(None),
+                        VideoJob.lease_expires_at <= now_sql,
+                    ]
+                )
                 err_code = "WORKER_LEASE_EXPIRED"
                 err_msg = (
                     "Worker lease expired before completion; reserved credit safely refunded."
                 )
                 stage_detail = "Worker lease expired — credit refunded"
             else:
-                # Unleased / legacy in-flight row: respect grace window.
-                if grace_seconds > 0 and updated_at is not None and updated_at > unleased_cutoff:
-                    continue
+                where_clauses.append(VideoJob.lease_expires_at.is_(None))
+                if grace_seconds > 0:
+                    where_clauses.append(
+                        VideoJob.updated_at <= db_offset_expr(job_session, -float(grace_seconds))
+                    )
                 err_code = "WORKER_INTERRUPTED"
                 err_msg = (
                     "Worker restarted while job was in progress; reserved credit refunded."
@@ -1067,14 +1360,9 @@ def recover_interrupted_jobs(min_age_seconds: int | None = None) -> int:
             next_script = dict(job.script_json or {})
             next_script["status_history"] = hist
 
-            old_token = int(job.fencing_token or 0)
-            stmt = (
+            upd = job_session.execute(
                 update(VideoJob)
-                .where(
-                    VideoJob.id == job.id,
-                    VideoJob.status.in_(in_flight_statuses),
-                    VideoJob.fencing_token == old_token,
-                )
+                .where(*where_clauses)
                 .values(
                     status="FAILED",
                     progress_pct=0,
@@ -1085,25 +1373,52 @@ def recover_interrupted_jobs(min_age_seconds: int | None = None) -> int:
                     lease_expires_at=None,
                     fencing_token=VideoJob.fencing_token + 1,
                     script_json=next_script,
-                    updated_at=now,
+                    updated_at=now_sql,
                 )
             )
-            upd = session.execute(stmt)
             if int(upd.rowcount or 0) != 1:
+                job_session.rollback()
                 continue
 
+            job_session.execute(
+                update(JobDispatchOutbox)
+                .where(
+                    JobDispatchOutbox.job_id == job_id,
+                    JobDispatchOutbox.status.in_(("PENDING", "PUBLISHING")),
+                )
+                .values(status="CANCELLED", updated_at=now_sql)
+            )
             refund_credit_atomically(
-                session,
+                job_session,
                 workspace_id=job.workspace_id,
                 job_id=job.id,
                 user_id=job.user_id,
                 cost=int(job.reserved_credits or 1),
                 reason="Automatic refund for interrupted/expired-lease job on recovery",
             )
+            job_session.commit()
             recovered += 1
-        session.commit()
 
     if recovered:
         metrics_registry.incr("jobs.recovered", recovered)
         log_audit_event("worker_recovered_interrupted_jobs", details={"recovered_count": recovered})
+    return recovered
+
+
+def recover_interrupted_jobs(
+    min_age_seconds: int | None = None,
+    *,
+    reconcile_outbox: bool = True,
+) -> int:
+    """Recover genuinely abandoned active jobs without harming queued jobs, then relay outbox."""
+    recovered = recover_expired_leases(min_age_seconds=min_age_seconds)
+    if reconcile_outbox:
+        try:
+            reconcile_dispatch_outbox()
+        except Exception as exc:
+            log_audit_event(
+                "outbox_reconciliation_skipped",
+                level="WARNING",
+                details={"reason": type(exc).__name__},
+            )
     return recovered

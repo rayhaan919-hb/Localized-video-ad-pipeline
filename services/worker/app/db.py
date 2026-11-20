@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    and_,
     case,
     create_engine,
     event,
@@ -45,6 +46,9 @@ CANONICAL_JOB_STATUSES = (
     "CANCELLED",
 )
 VALID_STATUSES = CANONICAL_JOB_STATUSES + ("PENDING", "GENERATING_CLIPS", "COMPOSITING")
+ACTIVE_EXECUTION_STATUSES = ("PROCESSING", "RENDERING", "GENERATING_CLIPS", "COMPOSITING")
+QUEUED_JOB_STATUSES = ("CREATED", "QUEUED", "PENDING")
+TERMINAL_JOB_STATUSES = ("COMPLETED", "FAILED", "CANCELLED")
 VALID_WORKSPACE_ROLES = ("owner", "admin", "member")
 VALID_TRANSACTION_TYPES = (
     "initial_promo",
@@ -303,7 +307,7 @@ class CreditLedger(Base):
         UUIDString(), primary_key=True, default=lambda: str(uuid.uuid4())
     )
     workspace_id: Mapped[str] = mapped_column(
-        UUIDString(), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+        UUIDString(), ForeignKey("workspaces.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     user_id: Mapped[str | None] = mapped_column(
         UUIDString(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
@@ -355,6 +359,50 @@ class StripeEvent(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="processed")
     payload_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+
+class JobDispatchOutbox(Base):
+    """Transactional outbox ensuring durable job publication across API/broker failures."""
+
+    __tablename__ = "job_dispatch_outbox"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING', 'PUBLISHING', 'PUBLISHED', 'FAILED', 'CANCELLED')",
+            name="ck_job_dispatch_outbox_status",
+        ),
+        Index("idx_job_dispatch_outbox_status_next", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        UUIDString(), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    job_id: Mapped[str] = mapped_column(
+        UUIDString(),
+        ForeignKey("video_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        UUIDString(),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )
 
@@ -963,36 +1011,104 @@ def reverse_credits_for_payment_refund(
     return new_balance, revoked
 
 
+def db_dialect_name(session: Session) -> str:
+    """Return the active SQLAlchemy dialect name for session."""
+    bind = session.get_bind()
+    return bind.dialect.name if bind is not None else "sqlite"
+
+
+def db_now_expr(session: Session):
+    """Return a database-server clock expression (avoids app-host clock skew)."""
+    if db_dialect_name(session) == "postgresql":
+        return func.clock_timestamp()
+    return func.strftime("%Y-%m-%d %H:%M:%f", "now").op("||")("000")
+
+
+def db_offset_expr(session: Session, offset_seconds: float):
+    """Return a database-server timestamp offset by offset_seconds."""
+    offset = float(offset_seconds)
+    if db_dialect_name(session) == "postgresql":
+        return func.clock_timestamp() + func.make_interval(0, 0, 0, 0, 0, 0, offset)
+    return func.strftime("%Y-%m-%d %H:%M:%f", "now", f"{offset:+.3f} seconds").op("||")("000")
+
+
+def get_db_now(session: Session) -> datetime:
+    """Fetch the current database clock timestamp as a timezone-aware UTC datetime."""
+    val = session.execute(select(db_now_expr(session))).scalar_one()
+    if isinstance(val, datetime):
+        return val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
+    parsed = datetime.fromisoformat(str(val))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def create_dispatch_outbox_event(
+    session: Session,
+    *,
+    job_id: str | uuid.UUID,
+    workspace_id: str | uuid.UUID,
+    payload: dict[str, Any],
+    max_attempts: int = 5,
+) -> JobDispatchOutbox:
+    """Persist a durable outbox dispatch entry idempotently inside the caller transaction."""
+    job_str = str(uuid.UUID(str(job_id)))
+    ws_str = str(uuid.UUID(str(workspace_id)))
+    existing = session.scalar(
+        select(JobDispatchOutbox).where(JobDispatchOutbox.job_id == job_str)
+    )
+    if existing is not None:
+        return existing
+    now_sql = db_now_expr(session)
+    outbox = JobDispatchOutbox(
+        id=str(uuid.uuid4()),
+        job_id=job_str,
+        workspace_id=ws_str,
+        payload_json=dict(payload),
+        status="PENDING",
+        attempts=0,
+        max_attempts=max(1, int(max_attempts)),
+        next_attempt_at=now_sql,
+        created_at=now_sql,
+        updated_at=now_sql,
+    )
+    session.add(outbox)
+    session.flush()
+    return outbox
+
+
 def acquire_job_lease(
     session: Session,
     *,
     job_id: str | uuid.UUID,
     worker_id: str,
-    lease_seconds: int = 120,
+    lease_seconds: float | int = 120,
 ) -> int | None:
-    """Atomically claim or renew ownership of an active VideoJob with fencing token increment."""
+    """Atomically claim an unassigned or expired VideoJob lease with fencing token increment."""
     job_str = str(uuid.UUID(str(job_id)))
-    now = utcnow()
-    expires = now + timedelta(seconds=max(5, int(lease_seconds)))
-    terminal_statuses = ("COMPLETED", "FAILED", "CANCELLED")
+    now_sql = db_now_expr(session)
+    exp_sql = db_offset_expr(session, max(0.05, float(lease_seconds)))
     stmt = (
         update(VideoJob)
         .where(
             VideoJob.id == job_str,
-            VideoJob.status.notin_(terminal_statuses),
+            VideoJob.status.notin_(TERMINAL_JOB_STATUSES),
             or_(
-                VideoJob.worker_id.is_(None),
-                VideoJob.worker_id == worker_id,
-                VideoJob.lease_expires_at.is_(None),
-                VideoJob.lease_expires_at <= now,
+                and_(VideoJob.worker_id.is_(None), VideoJob.lease_expires_at.is_(None)),
+                and_(
+                    VideoJob.lease_expires_at.is_not(None),
+                    VideoJob.lease_expires_at <= now_sql,
+                ),
             ),
         )
         .values(
+            status=case(
+                (VideoJob.status.in_(QUEUED_JOB_STATUSES), "PROCESSING"),
+                else_=VideoJob.status,
+            ),
             worker_id=worker_id,
-            heartbeat_at=now,
-            lease_expires_at=expires,
+            heartbeat_at=now_sql,
+            lease_expires_at=exp_sql,
             fencing_token=VideoJob.fencing_token + 1,
-            updated_at=now,
+            updated_at=now_sql,
         )
         .returning(VideoJob.fencing_token)
     )
@@ -1003,7 +1119,14 @@ def acquire_job_lease(
         if isinstance(obj, VideoJob) and obj.id == job_str:
             session.expire(
                 obj,
-                ["worker_id", "heartbeat_at", "lease_expires_at", "fencing_token", "updated_at"],
+                [
+                    "status",
+                    "worker_id",
+                    "heartbeat_at",
+                    "lease_expires_at",
+                    "fencing_token",
+                    "updated_at",
+                ],
             )
     return int(row[0])
 
@@ -1014,25 +1137,26 @@ def renew_job_lease(
     job_id: str | uuid.UUID,
     worker_id: str,
     fencing_token: int,
-    lease_seconds: int = 120,
+    lease_seconds: float | int = 120,
 ) -> bool:
-    """Extend an active worker lease if worker_id and fencing_token still match."""
+    """Extend an unexpired lease via DB clock without reviving expired/recovered jobs."""
     job_str = str(uuid.UUID(str(job_id)))
-    now = utcnow()
-    expires = now + timedelta(seconds=max(5, int(lease_seconds)))
-    terminal_statuses = ("COMPLETED", "FAILED", "CANCELLED")
+    now_sql = db_now_expr(session)
+    exp_sql = db_offset_expr(session, max(0.05, float(lease_seconds)))
     res = session.execute(
         update(VideoJob)
         .where(
             VideoJob.id == job_str,
             VideoJob.worker_id == worker_id,
             VideoJob.fencing_token == int(fencing_token),
-            VideoJob.status.notin_(terminal_statuses),
+            VideoJob.status.in_(ACTIVE_EXECUTION_STATUSES),
+            VideoJob.lease_expires_at.is_not(None),
+            VideoJob.lease_expires_at > now_sql,
         )
         .values(
-            heartbeat_at=now,
-            lease_expires_at=expires,
-            updated_at=now,
+            heartbeat_at=now_sql,
+            lease_expires_at=exp_sql,
+            updated_at=now_sql,
         )
     )
     return int(res.rowcount or 0) > 0
@@ -1047,6 +1171,7 @@ def release_job_lease(
 ) -> bool:
     """Release worker ownership cleanly only if worker_id and fencing_token match."""
     job_str = str(uuid.UUID(str(job_id)))
+    now_sql = db_now_expr(session)
     res = session.execute(
         update(VideoJob)
         .where(
@@ -1057,7 +1182,7 @@ def release_job_lease(
         .values(
             worker_id=None,
             lease_expires_at=None,
-            updated_at=utcnow(),
+            updated_at=now_sql,
         )
     )
     return int(res.rowcount or 0) > 0

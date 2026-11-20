@@ -7,6 +7,7 @@ from sqlalchemy import Engine, inspect, text
 MIGRATION_VERSION = "002_saas_multi_tenant_auth_billing"
 MIGRATION_VERSION_003 = "003_google_oauth_identity"
 MIGRATION_VERSION_004 = "004_job_leases_and_immutability"
+MIGRATION_VERSION_005 = "005_transactional_outbox_and_rls_hardening"
 
 _LEGACY_USER_COLUMN_DEFAULTS = {
     "auth_provider": "VARCHAR(32) NOT NULL DEFAULT 'password'",
@@ -281,8 +282,19 @@ def run_migrations(engine: Engine, metadata) -> None:
                         "ON users (google_sub) WHERE google_sub IS NOT NULL"
                     )
                 )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_job_dispatch_outbox_status_next "
+                    "ON job_dispatch_outbox (status, next_attempt_at)"
+                )
+            )
 
-        for version_tag in (MIGRATION_VERSION, MIGRATION_VERSION_003, MIGRATION_VERSION_004):
+        for version_tag in (
+            MIGRATION_VERSION,
+            MIGRATION_VERSION_003,
+            MIGRATION_VERSION_004,
+            MIGRATION_VERSION_005,
+        ):
             already = conn.execute(
                 text("SELECT version FROM schema_migrations WHERE version = :v"),
                 {"v": version_tag},

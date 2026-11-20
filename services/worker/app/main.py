@@ -28,7 +28,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import AnyHttpUrl, BaseModel, Field
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -74,6 +74,7 @@ from app.config import settings, validate_production_config
 from app.db import (
     CreditLedger,
     InsufficientCreditsError,
+    JobDispatchOutbox,
     User,
     VideoJob,
     Workspace,
@@ -81,7 +82,9 @@ from app.db import (
     WorkspaceMember,
     add_credits_atomically,
     adjust_credits_atomically,
+    create_dispatch_outbox_event,
     create_workspace_for_user,
+    db_now_expr,
     get_session,
     init_db,
     reconcile_workspace_credits,
@@ -113,7 +116,7 @@ from app.tasks import (
     BrokerUnavailableError,
     celery_app,
     check_queue_health,
-    dispatch_video_job,
+    publish_outbox_event,
     recover_interrupted_jobs,
 )
 from app.veo import get_ffmpeg_binary
@@ -468,7 +471,7 @@ def ops_metrics(
     db.execute(text("SELECT 1"))
     db_latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
 
-    now = utcnow()
+    now_sql = db_now_expr(db)
     in_flight = int(
         db.scalar(
             select(func.count(VideoJob.id)).where(
@@ -481,7 +484,7 @@ def ops_metrics(
         db.scalar(
             select(func.count(VideoJob.id)).where(
                 VideoJob.status.in_(("PROCESSING", "RENDERING")),
-                VideoJob.lease_expires_at > now,
+                VideoJob.lease_expires_at > now_sql,
             )
         )
         or 0
@@ -491,13 +494,33 @@ def ops_metrics(
             select(func.count(VideoJob.id)).where(
                 VideoJob.status.in_(("PROCESSING", "RENDERING")),
                 VideoJob.lease_expires_at.is_not(None),
-                VideoJob.lease_expires_at <= now,
+                VideoJob.lease_expires_at <= now_sql,
             )
         )
         or 0
     )
     failed_jobs = int(
         db.scalar(select(func.count(VideoJob.id)).where(VideoJob.status == "FAILED")) or 0
+    )
+    outbox_pending = int(
+        db.scalar(
+            select(func.count(JobDispatchOutbox.id)).where(
+                JobDispatchOutbox.status.in_(("PENDING", "PUBLISHING"))
+            )
+        )
+        or 0
+    )
+    outbox_failed = int(
+        db.scalar(
+            select(func.count(JobDispatchOutbox.id)).where(JobDispatchOutbox.status == "FAILED")
+        )
+        or 0
+    )
+    outbox_published = int(
+        db.scalar(
+            select(func.count(JobDispatchOutbox.id)).where(JobDispatchOutbox.status == "PUBLISHED")
+        )
+        or 0
     )
     queue_health = check_queue_health(inspect_workers=False)
 
@@ -507,6 +530,11 @@ def ops_metrics(
         "db_latency_ms": db_latency_ms,
         "rate_limiter_backend": rate_limiter.backend_mode,
         "queue": queue_health,
+        "outbox": {
+            "pending": outbox_pending,
+            "failed": outbox_failed,
+            "published": outbox_published,
+        },
         "jobs": {
             "in_flight": in_flight,
             "active_leases": active_leases,
@@ -1613,45 +1641,25 @@ def generate_video(
             ),
         ) from exc
 
-    job.status = "QUEUED"
-    job.progress_pct = 10
-    job.stage_detail = "Queued for AI generation & rendering"
-    job.script_json = {"status_history": ["CREATED", "QUEUED"]}
-    job.updated_at = utcnow()
+    outbox_event = create_dispatch_outbox_event(
+        db,
+        job_id=job_id,
+        workspace_id=ws.id,
+        payload={
+            "job_id": job_id,
+            "ad_angle": payload.ad_angle,
+            "simulate_failure": payload.simulate_failure,
+            "custom_props": payload.custom_props,
+            "duration_seconds": payload.duration_seconds,
+            "aspect_ratio": payload.aspect_ratio,
+            "correlation_id": str(correlation_id)[:64] if correlation_id else None,
+        },
+    )
     db.commit()
 
     try:
-        dispatch_video_job(
-            job_id=job_id,
-            ad_angle=payload.ad_angle,
-            simulate_failure=payload.simulate_failure,
-            custom_props=payload.custom_props,
-            duration_seconds=payload.duration_seconds,
-            aspect_ratio=payload.aspect_ratio,
-            correlation_id=correlation_id,
-        )
+        publish_outbox_event(outbox_event.id, fail_job_on_broker_error=True)
     except (BrokerUnavailableError, Exception) as exc:
-        db.rollback()
-        failed = db.get(VideoJob, job_id)
-        if failed is not None:
-            failed.status = "FAILED"
-            failed.error_code = (
-                "BROKER_UNAVAILABLE"
-                if isinstance(exc, BrokerUnavailableError)
-                else "QUEUE_DISPATCH_FAILED"
-            )
-            failed.error_message = "Could not enqueue background render job; credit refunded."
-            failed.stage_detail = "Dispatch failed"
-            failed.updated_at = utcnow()
-        refund_credit_atomically(
-            db,
-            workspace_id=ws.id,
-            job_id=job_id,
-            user_id=current_user.id,
-            cost=1,
-            reason=f"Queue dispatch failed: {type(exc).__name__}",
-        )
-        db.commit()
         metrics_registry.incr("jobs.dispatch_failed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -1741,14 +1749,38 @@ def cancel_video_job(
         user=current_user,
         minimum_role="member",
     )
-    if job.status in ("COMPLETED", "FAILED", "CANCELLED"):
+    now_sql = db_now_expr(db)
+    upd = db.execute(
+        update(VideoJob)
+        .where(
+            VideoJob.id == job.id,
+            VideoJob.status.notin_(("COMPLETED", "FAILED", "CANCELLED")),
+        )
+        .values(
+            status="CANCELLED",
+            stage_detail="Cancelled by customer — reserved credit refunded",
+            worker_id=None,
+            lease_expires_at=None,
+            fencing_token=VideoJob.fencing_token + 1,
+            updated_at=now_sql,
+        )
+    )
+    if int(upd.rowcount or 0) != 1:
+        db.rollback()
+        latest = db.get(VideoJob, job.id)
+        cur_status = latest.status if latest else "UNKNOWN"
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Cannot cancel job in terminal status '{job.status}'.",
+            detail=f"Cannot cancel job in terminal status '{cur_status}'.",
         )
-    job.status = "CANCELLED"
-    job.stage_detail = "Cancelled by customer — reserved credit refunded"
-    job.updated_at = utcnow()
+    db.execute(
+        update(JobDispatchOutbox)
+        .where(
+            JobDispatchOutbox.job_id == job.id,
+            JobDispatchOutbox.status.in_(("PENDING", "PUBLISHING")),
+        )
+        .values(status="CANCELLED", updated_at=now_sql)
+    )
     refund_credit_atomically(
         db,
         workspace_id=ws.id,
@@ -1758,9 +1790,13 @@ def cancel_video_job(
         reason="Customer cancelled queued/in-progress job",
     )
     db.commit()
-    db.refresh(job)
-    db.refresh(ws)
-    return _serialize_job(job, credit_balance=ws.credit_balance)
+    db.expire_all()
+    cancelled_job = db.get(VideoJob, job.id)
+    updated_ws = db.get(Workspace, ws.id)
+    assert cancelled_job is not None
+    return _serialize_job(
+        cancelled_job, credit_balance=updated_ws.credit_balance if updated_ws else None
+    )
 
 
 @app.post(

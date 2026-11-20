@@ -151,6 +151,23 @@ CREATE TABLE IF NOT EXISTS stripe_events (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS job_dispatch_outbox (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_id UUID NOT NULL UNIQUE REFERENCES video_jobs(id) ON DELETE CASCADE,
+  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  payload_json JSONB NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (
+    status IN ('PENDING', 'PUBLISHING', 'PUBLISHED', 'FAILED', 'CANCELLED')
+  ),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 5,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_error TEXT,
+  published_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions (user_id);
 CREATE INDEX IF NOT EXISTS idx_workspace_members_user_id ON workspace_members (user_id);
 CREATE INDEX IF NOT EXISTS idx_workspace_assets_workspace_id ON workspace_assets (workspace_id, created_at DESC);
@@ -159,6 +176,7 @@ CREATE INDEX IF NOT EXISTS idx_video_jobs_status_lease ON video_jobs (status, le
 CREATE INDEX IF NOT EXISTS idx_video_jobs_correlation_id ON video_jobs (correlation_id);
 CREATE INDEX IF NOT EXISTS idx_credit_ledger_workspace_created_at ON credit_ledger (workspace_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stripe_events_payment_intent ON stripe_events (payment_intent_id);
+CREATE INDEX IF NOT EXISTS idx_job_dispatch_outbox_status_next ON job_dispatch_outbox (status, next_attempt_at);
 
 -- Financial audit ledger immutability guard
 CREATE OR REPLACE FUNCTION public.prevent_credit_ledger_delete()
@@ -195,6 +213,8 @@ ALTER TABLE video_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE video_jobs FORCE ROW LEVEL SECURITY;
 ALTER TABLE credit_ledger ENABLE ROW LEVEL SECURITY;
 ALTER TABLE credit_ledger FORCE ROW LEVEL SECURITY;
+ALTER TABLE job_dispatch_outbox ENABLE ROW LEVEL SECURITY;
+ALTER TABLE job_dispatch_outbox FORCE ROW LEVEL SECURITY;
 
 -- Security-definer helpers prevent infinite RLS recursion on workspace_members
 CREATE OR REPLACE FUNCTION public.is_workspace_member(target_workspace_id UUID)
@@ -233,49 +253,59 @@ REVOKE ALL ON FUNCTION public.is_workspace_admin(UUID) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.is_workspace_member(UUID) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.is_workspace_admin(UUID) TO authenticated, service_role;
 
--- Sensitive internal tables (users, auth_sessions, stripe_events, schema_migrations)
+-- Sensitive internal tables (users, auth_sessions, stripe_events, job_dispatch_outbox, schema_migrations)
 -- keep RLS enabled with no permissive anon/authenticated policies (default deny for PostgREST).
 
 CREATE POLICY workspaces_member_select
   ON workspaces FOR SELECT
+  TO authenticated
   USING (public.is_workspace_member(id));
 
 CREATE POLICY workspaces_owner_insert
   ON workspaces FOR INSERT
+  TO authenticated
   WITH CHECK ((SELECT auth.uid()) = owner_id);
 
 CREATE POLICY workspaces_admin_update
   ON workspaces FOR UPDATE
+  TO authenticated
   USING (public.is_workspace_admin(id))
   WITH CHECK (public.is_workspace_admin(id));
 
 CREATE POLICY workspace_members_select
   ON workspace_members FOR SELECT
+  TO authenticated
   USING (public.is_workspace_member(workspace_id));
 
 CREATE POLICY workspace_members_admin_insert
   ON workspace_members FOR INSERT
+  TO authenticated
   WITH CHECK (public.is_workspace_admin(workspace_id));
 
 CREATE POLICY workspace_members_admin_update
   ON workspace_members FOR UPDATE
+  TO authenticated
   USING (public.is_workspace_admin(workspace_id))
   WITH CHECK (public.is_workspace_admin(workspace_id));
 
 CREATE POLICY workspace_members_admin_delete
   ON workspace_members FOR DELETE
+  TO authenticated
   USING (public.is_workspace_admin(workspace_id));
 
 CREATE POLICY workspace_assets_member_all
   ON workspace_assets FOR ALL
+  TO authenticated
   USING (public.is_workspace_member(workspace_id))
   WITH CHECK (public.is_workspace_member(workspace_id));
 
 CREATE POLICY video_jobs_member_all
   ON video_jobs FOR ALL
+  TO authenticated
   USING (public.is_workspace_member(workspace_id))
   WITH CHECK (public.is_workspace_member(workspace_id));
 
 CREATE POLICY credit_ledger_member_select
   ON credit_ledger FOR SELECT
+  TO authenticated
   USING (public.is_workspace_member(workspace_id));
